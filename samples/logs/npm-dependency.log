@@ -1,0 +1,3 @@
+npm ERR! code ERESOLVE
+Could not resolve dependency tree
+module not found: @example/missing-package

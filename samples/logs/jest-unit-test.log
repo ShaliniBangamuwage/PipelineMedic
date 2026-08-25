@@ -1,0 +1,3 @@
+FAIL src/auth.test.ts
+AssertionError: expected true, received false
+Test failed: login redirects to dashboard

@@ -1,0 +1,2 @@
+2025-01-20T10:02:00Z Error TS2322: Type 'string' is not assignable to type 'number'.
+Error: compilation failed in build step
