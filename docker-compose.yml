@@ -11,15 +11,21 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
   backend:
     build: ./apps/backend
     environment:
       DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/pipelinemedic
       FRONTEND_URL: http://localhost
+      REDIS_URL: redis://redis:6379/0
     ports: ["8000:8000"]
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_started
   frontend:
     build: ./apps/frontend
     ports: ["80:80"]

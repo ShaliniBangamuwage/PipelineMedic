@@ -1,5 +1,4 @@
 import re
-from collections import Counter
 
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 SECRET = re.compile(r"(?i)(bearer\s+|gh[pousr]_[A-Za-z0-9_]+|(?:token|password|secret|api[_-]?key)\s*[=:]\s*)[^\s,;]+")
@@ -18,5 +17,11 @@ def process_log(text: str, max_bytes: int = 5_000_000, max_chars: int = 30_000):
         if collapsed and collapsed[-1] == line: continue
         if line or (collapsed and collapsed[-1]): collapsed.append(line)
     cleaned="\n".join(collapsed).strip()
-    important=[line.strip() for line in collapsed if re.search(r"(?i)(error|failed|failure|exception|fatal|denied|timeout|not found|assertion|traceback|npm err|migration)", line)]
+    important=[]
+    seen=set()
+    for line in collapsed:
+        candidate=line.strip()
+        if candidate and re.search(r"(?i)(error|failed|failure|exception|fatal|denied|timeout|not found|assertion|traceback|npm err|migration)", candidate) and candidate not in seen:
+            important.append(candidate)
+            seen.add(candidate)
     return {"cleaned_log": cleaned, "evidence": important[:30], "ai_log": cleaned[:max_chars]}

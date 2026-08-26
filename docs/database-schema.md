@@ -10,3 +10,5 @@ erDiagram
 ```
 
 PostgreSQL is the intended deployment database. pgvector and separate workflow/action/feedback tables remain planned extensions.
+
+Migration `0002_auth_tenancy` adds users, organizations, organization members, refresh tokens, invitations, and nullable organization ownership columns to legacy repository, analysis, and feedback rows. Existing demo rows remain nullable and are not mixed into authenticated organization scopes.

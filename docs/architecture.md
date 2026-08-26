@@ -9,11 +9,11 @@ flowchart LR
   LP --> RB[Rule based analyzer]
   RB --> DB[(SQLAlchemy database)]
   GH[GitHub workflow_run webhook] --> API
-  API -. optional future .-> AI[Groq analyzer]
+  API -. optional .-> AI[Groq analyzer]
 ```
 
 Demo flow: form or file -> validation -> ANSI/timestamp cleanup and redaction -> evidence extraction -> weighted classification -> database -> result/history APIs.
 
-Webhook flow: raw body -> HMAC verification -> event filtering -> failed run deduplication -> queued processing hook. GitHub log retrieval and background analysis are the next implementation slice.
+Webhook flow: raw body -> HMAC verification -> event filtering -> failed run deduplication -> queued processing -> optional GitHub archive retrieval -> redacted analysis persistence.
 
-AI fallback: rule-based analysis is always available and is the visible default in demo mode. No external credential is required.
+AI fallback: rule-based analysis is always available. Groq responses are schema-validated and evidence is restricted to extracted log lines before persistence.
