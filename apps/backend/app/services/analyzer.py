@@ -12,4 +12,8 @@ def analyze(cleaned_log: str, evidence: list[str]):
     _, category, base, hits=max(scores,key=lambda item:item[0])
     severity=Severity.CRITICAL.value if category in (Category.DATABASE_MIGRATION_ERROR,Category.DEPLOYMENT_ERROR) else Severity.HIGH.value if base >= .9 else Severity.MEDIUM.value
     label=category.value.replace("_"," ").title()
-    return {"category":category.value,"confidence":min(.99, base + min(.06,len(hits)*.01)),"severity":severity,"summary":f"{label} detected from workflow evidence.","root_cause":f"The log contains signatures associated with {label.lower()}.","failed_step":next((x for x in hits if "step" in x.lower()),"Workflow execution"),"evidence":hits[:10],"suggested_actions":[{"description":f"Inspect and remediate the {label.lower()} reported in the evidence.","priority":1},{"description":"Re-run the workflow after applying the fix.","priority":2}]}
+    failed_step="npm run build" if re.search(r"Run\s+npm\s+run\s+build", cleaned_log, re.I) else next((x for x in hits if "step" in x.lower()),"Workflow execution")
+    missing=re.search(r"TS2741.*Property ['\"]([^'\"]+)['\"].*required in type ['\"]([^'\"]+)", cleaned_log, re.I)
+    root_cause=f"The log contains signatures associated with {label.lower()}."
+    if missing: root_cause=f"Property '{missing.group(1)}' is missing from the target {missing.group(2)} DTO or interface."
+    return {"category":category.value,"confidence":min(.99, base + min(.06,len(hits)*.01)),"severity":severity,"summary":f"{label} detected from workflow evidence.","root_cause":root_cause,"failed_step":failed_step,"evidence":list(dict.fromkeys(hits))[:10],"suggested_actions":[{"description":f"Inspect and remediate the {label.lower()} reported in the evidence.","priority":1},{"description":"Re-run the workflow after applying the fix.","priority":2}]}

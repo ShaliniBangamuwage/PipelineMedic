@@ -14,3 +14,13 @@ def test_classifier_detects_typescript():
 
 def test_classifier_falls_back_to_unknown():
     assert analyze("nothing", [])["category"] == "UNKNOWN"
+
+def test_build_step_and_missing_property_are_extracted():
+    log="Run npm run build\nTS2741: Property 'email' is missing in type '{}' but required in type 'UserDto'."
+    result=analyze(log, ["Run npm run build", "TS2741: Property 'email' is missing in type '{}' but required in type 'UserDto'."])
+    assert result['failed_step'] == 'npm run build'
+    assert "email" in result['root_cause'] and 'UserDto' in result['root_cause']
+
+def test_evidence_lines_are_deduplicated():
+    result=process_log("ERROR duplicate\nERROR duplicate\nERROR other")
+    assert result['evidence'] == ['ERROR duplicate', 'ERROR other']
