@@ -2,15 +2,22 @@ import signal
 import time
 import json
 import re
+import logging
 from collections.abc import Callable
-from sqlalchemy import select
+from datetime import datetime, timezone
+from sqlalchemy import select, text
 from app.core.config import settings
 from app.db import SessionLocal
-from app.models import FailureAnalysis, Job, PatchSuggestion, PRCommentDelivery, Repository
-from app.services.github import GitHubClient
+from app.models import FailureAnalysis, Job, PatchSuggestion, PRCommentDelivery, Repository, WorkflowRun
+from app.services.github import GitHubClient, GitHubClientError
 from app.services.pr_comments import deliver
 from app.services.patch_generation import OpenAICompatiblePatchProvider, PatchProviderError, PatchTemporaryError, generate_and_validate
-from app.services.jobs import JobStatus, publish, queue_depth, redact_error, redis_client, redis_health, retry
+from app.services.log_processing import process_log
+from app.services.ai import analyze_with_fallback
+from app.services.jobs import JobStatus, acquire_distributed_lock, publish, queue_depth, redact_error, redis_client, redis_health, release_distributed_lock, retry
+from app.services.pr_comments import queue_delivery
+
+logger = logging.getLogger("pipelinemedic.worker")
 
 class TemporaryJobError(Exception):
     pass
@@ -28,29 +35,62 @@ def worker_health():
 
 def _claim(job_id: str) -> Job | None:
     with SessionLocal() as db:
-        job = db.scalar(select(Job).where(Job.id == job_id))
-        if not job or job.status not in (JobStatus.QUEUED.value, JobStatus.RETRYING.value):
+        if db.bind and db.bind.dialect.name == "sqlite":
+            db.execute(text("BEGIN IMMEDIATE"))
+
+        if db.bind and db.bind.dialect.name == "postgresql":
+            result = db.execute(
+                text("UPDATE jobs SET status = :status, error_message = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = :job_id AND status IN (:queued, :retrying) RETURNING id, kind, attempts, status"),
+                {"status": JobStatus.RUNNING.value, "job_id": job_id, "queued": JobStatus.QUEUED.value, "retrying": JobStatus.RETRYING.value},
+            )
+            row = result.fetchone()
+            if not row:
+                db.rollback()
+                return None
+            db.commit()
+            job = db.get(Job, job_id)
+            if not job:
+                return None
+            job.status = JobStatus.RUNNING.value
+            job.error_message = None
+            db.expunge(job)
+            return job
+
+        result = db.execute(
+            text("UPDATE jobs SET status = :status, error_message = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = :job_id AND status IN (:queued, :retrying)"),
+            {"status": JobStatus.RUNNING.value, "job_id": job_id, "queued": JobStatus.QUEUED.value, "retrying": JobStatus.RETRYING.value},
+        )
+        if result.rowcount != 1:
+            db.rollback()
+            return None
+        db.commit()
+        job = db.get(Job, job_id)
+        if not job:
             return None
         job.status = JobStatus.RUNNING.value
         job.error_message = None
-        db.commit()
-        db.refresh(job)
         db.expunge(job)
         return job
 
 def process_job(job_id: str, handler: Callable[[Job], None]) -> str | None:
     claimed = _claim(job_id)
     if not claimed:
+        logger.info("job_claim_skipped", extra={"job_id": job_id, "status": "claim_skipped"})
         return None
+    started_at = datetime.now(timezone.utc)
+    lock_token = acquire_distributed_lock(job_id)
+    logger.info("job_state_transition", extra={"job_id": job_id, "kind": claimed.kind, "attempts": claimed.attempts, "from_status": "QUEUED_OR_RETRYING", "to_status": JobStatus.RUNNING.value, "event": "claimed", "lock_acquired": lock_token is not None})
     try:
         handler(claimed)
     except PermanentJobError as error:
         with SessionLocal() as db:
             job = db.get(Job, job_id)
             if job:
-                job.status = JobStatus.FAILED.value
+                job.status = JobStatus.FAILED_PERMANENT.value
                 job.error_message = redact_error(error)
+                job.next_retry_at = None
                 db.commit()
+                logger.info("job_state_transition", extra={"job_id": job_id, "kind": job.kind, "attempts": job.attempts, "from_status": JobStatus.RUNNING.value, "to_status": JobStatus.FAILED_PERMANENT.value, "event": "failed_permanent", "duration_ms": int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)})
                 return job.status
     except Exception as error:
         with SessionLocal() as db:
@@ -60,15 +100,20 @@ def process_job(job_id: str, handler: Callable[[Job], None]) -> str | None:
             if retry(job):
                 job.error_message = redact_error(error)
                 db.commit()
+                logger.info("job_state_transition", extra={"job_id": job_id, "kind": job.kind, "attempts": job.attempts, "from_status": JobStatus.RUNNING.value, "to_status": job.status, "event": "retry_scheduled", "duration_ms": int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)})
                 try:
                     publish(job.id)
                 except Exception:
                     pass
                 return job.status
-            job.status = JobStatus.FAILED.value
+            job.status = JobStatus.FAILED_PERMANENT.value
             job.error_message = redact_error(error)
+            job.next_retry_at = None
             db.commit()
+            logger.info("job_state_transition", extra={"job_id": job_id, "kind": job.kind, "attempts": job.attempts, "from_status": JobStatus.RUNNING.value, "to_status": JobStatus.FAILED_PERMANENT.value, "event": "dead_lettered", "duration_ms": int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)})
             return job.status
+    finally:
+        release_distributed_lock(job_id, lock_token)
     with SessionLocal() as db:
         job = db.get(Job, job_id)
         if job:
@@ -76,17 +121,31 @@ def process_job(job_id: str, handler: Callable[[Job], None]) -> str | None:
             job.error_message = None
             job.next_retry_at = None
             db.commit()
+            logger.info("job_state_transition", extra={"job_id": job_id, "kind": job.kind, "attempts": job.attempts, "from_status": JobStatus.RUNNING.value, "to_status": JobStatus.COMPLETED.value, "event": "completed", "duration_ms": int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)})
             return job.status
     return None
 
-def run_once(handler: Callable[[Job], None] | None = None) -> bool:
-    """Preserve inline mode for demos and local execution."""
+def _process_inline_job(job: Job):
     with SessionLocal() as db:
-        job = db.scalar(select(Job).where(Job.status == JobStatus.QUEUED.value).order_by(Job.created_at))
-        job_id = job.id if job else None
-    if not job_id:
+        handle_job(job, db, GitHubClient(settings.github_token))
+
+
+def run_once(handler: Callable[[Job], None] | None = None, job_id: str | None = None) -> bool:
+    """Preserve inline mode for demos and local execution.
+
+    In local/demo mode we prefer the most recently queued item so a newly
+    enqueued workflow run is picked up promptly instead of waiting behind stale
+    backlog entries from earlier tests or manual runs.
+    """
+    with SessionLocal() as db:
+        if job_id:
+            job = db.scalar(select(Job).where(Job.id == job_id, Job.status == JobStatus.QUEUED.value))
+        else:
+            job = db.scalar(select(Job).where(Job.status == JobStatus.QUEUED.value).order_by(Job.created_at.desc()))
+        selected_id = job.id if job else None
+    if not selected_id:
         return False
-    process_job(job_id, handler or (lambda _: None))
+    process_job(selected_id, handler or _process_inline_job)
     return True
 
 def consume(handler: Callable[[Job], None], client=None, stop: Callable[[], bool] | None = None):
@@ -105,6 +164,9 @@ def consume(handler: Callable[[Job], None], client=None, stop: Callable[[], bool
             time.sleep(settings.worker_backoff_seconds)
 
 def handle_job(job: Job, db, github_client=None, patch_provider=None):
+    if job.kind == "ANALYZE_WORKFLOW_RUN":
+        handle_analyze_workflow_run(job, db, github_client)
+        return
     if job.kind == "PR_COMMENT_DELIVERY":
         delivery = db.get(PRCommentDelivery, job.workflow_run_id)
         analysis = db.get(FailureAnalysis, delivery.analysis_id) if delivery else None
@@ -138,6 +200,46 @@ def handle_job(job: Job, db, github_client=None, patch_provider=None):
         patch.status = "FAILED"
         patch.validation_errors = json.dumps([redact_error(error)])
     db.commit()
+
+def handle_analyze_workflow_run(job: Job, db, github_client=None):
+    workflow_run = db.scalar(select(WorkflowRun).where(WorkflowRun.github_run_id == job.workflow_run_id))
+    if not workflow_run:
+        return
+    repository = db.get(Repository, workflow_run.repository_id)
+    if not repository:
+        return
+    log = f"Workflow {workflow_run.workflow_name} failed. GitHub logs were unavailable; inspect run {workflow_run.github_run_url}."
+    if settings.github_token and workflow_run.github_run_id:
+        try:
+            log = (github_client or GitHubClient(settings.github_token)).workflow_logs(
+                repository.owner, repository.name, int(workflow_run.github_run_id), settings.github_log_max_bytes
+            )
+        except (GitHubClientError, ValueError):
+            pass
+    processed = process_log(log, settings.max_log_size_bytes, settings.max_ai_log_characters)
+    result, provider = analyze_with_fallback(processed["ai_log"], processed["evidence"])
+    sha = workflow_run.head_sha
+    name = workflow_run.workflow_name
+    if db.scalar(select(FailureAnalysis).where(FailureAnalysis.commit_sha == sha, FailureAnalysis.workflow_name == name, FailureAnalysis.source == "GITHUB")):
+        return
+    item = FailureAnalysis(
+        repository_id=repository.id,
+        workflow_name=workflow_run.workflow_name,
+        branch=workflow_run.branch,
+        commit_sha=workflow_run.head_sha,
+        source="GITHUB",
+        category=result["category"],
+        summary=result["summary"],
+        root_cause=result.get("rootCause", ""),
+        failed_step=result.get("failedStep", "Unknown"),
+        confidence=result["confidence"],
+        severity=result["severity"],
+        cleaned_log=processed["cleaned_log"],
+        raw_log_excerpt="\n".join(result.get("evidence", []))
+    )
+    db.add(item)
+    db.commit()
+    queue_delivery(db, item, repository)
 
 def main():
     stopping = False

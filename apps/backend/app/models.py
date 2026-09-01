@@ -19,12 +19,31 @@ class Repository(Base):
     organization_id: Mapped[str|None] = mapped_column(ForeignKey("organizations.id"), nullable=True, index=True)
     owner: Mapped[str] = mapped_column(String(100)); name: Mapped[str] = mapped_column(String(100)); default_branch: Mapped[str] = mapped_column(String(100), default="main"); active: Mapped[bool] = mapped_column(Boolean, default=True); pr_comments_enabled: Mapped[bool] = mapped_column(Boolean, default=False); pr_comment_min_confidence: Mapped[float] = mapped_column(Float, default=0.8); pr_comment_allowed_branches: Mapped[str] = mapped_column(Text, default="main"); pr_comment_include_similar_incident: Mapped[bool] = mapped_column(Boolean, default=True); pr_comment_include_patch: Mapped[bool] = mapped_column(Boolean, default=False); created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now); updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
     analyses: Mapped[list["FailureAnalysis"]] = relationship(back_populates="repository")
+    workflow_runs: Mapped[list["WorkflowRun"]] = relationship(back_populates="repository")
+
+class WorkflowRun(Base):
+    __tablename__="workflow_runs"
+    __table_args__=(UniqueConstraint("repository_id", "github_run_id", name="uq_workflow_run_github_id"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    organization_id: Mapped[str|None] = mapped_column(ForeignKey("organizations.id"), nullable=True, index=True)
+    repository_id: Mapped[str] = mapped_column(ForeignKey("repositories.id"), index=True)
+    github_run_id: Mapped[str] = mapped_column(String(80), index=True)
+    github_run_url: Mapped[str] = mapped_column(String(500), default="")
+    workflow_name: Mapped[str] = mapped_column(String(200), default="")
+    branch: Mapped[str] = mapped_column(String(100), default="")
+    head_sha: Mapped[str] = mapped_column(String(100), default="")
+    status: Mapped[str] = mapped_column(String(20), default="", index=True)
+    conclusion: Mapped[str] = mapped_column(String(20), default="", index=True)
+    raw_payload: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+    repository: Mapped[Repository] = relationship(back_populates="workflow_runs")
 
 class FailureAnalysis(Base):
     __tablename__="analyses"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     organization_id: Mapped[str|None] = mapped_column(ForeignKey("organizations.id"), nullable=True, index=True)
-    repository_id: Mapped[str|None] = mapped_column(ForeignKey("repositories.id"), nullable=True); workflow_name: Mapped[str] = mapped_column(String(200), default="Manual analysis"); branch: Mapped[str] = mapped_column(String(200), default="main"); commit_sha: Mapped[str] = mapped_column(String(100), default=""); source: Mapped[str] = mapped_column(String(20), default="DEMO"); category: Mapped[str] = mapped_column(String(50)); summary: Mapped[str] = mapped_column(String(500)); root_cause: Mapped[str] = mapped_column(Text); failed_step: Mapped[str] = mapped_column(String(200), default="Unknown"); confidence: Mapped[float] = mapped_column(Float); severity: Mapped[str] = mapped_column(String(20)); cleaned_log: Mapped[str] = mapped_column(Text); raw_log_excerpt: Mapped[str] = mapped_column(Text); resolved: Mapped[bool] = mapped_column(Boolean, default=False); actual_solution: Mapped[str|None] = mapped_column(Text, nullable=True); created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now); updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+    repository_id: Mapped[str|None] = mapped_column(ForeignKey("repositories.id"), nullable=True); workflow_name: Mapped[str] = mapped_column(String(200), default="Manual analysis"); branch: Mapped[str] = mapped_column(String(200), default="main"); commit_sha: Mapped[str] = mapped_column(String(100), default=""); source: Mapped[str] = mapped_column(String(20), default="DEMO"); category: Mapped[str] = mapped_column(String(50)); summary: Mapped[str] = mapped_column(String(500)); root_cause: Mapped[str] = mapped_column(Text); failed_step: Mapped[str] = mapped_column(String(200), default="Unknown"); confidence: Mapped[float] = mapped_column(Float); severity: Mapped[str] = mapped_column(String(20)); cleaned_log: Mapped[str] = mapped_column(Text); raw_log_excerpt: Mapped[str] = mapped_column(Text); resolved: Mapped[bool] = mapped_column(Boolean, default=False); analysis_time_minutes: Mapped[float] = mapped_column(Float, default=0.0); resolution_time_minutes: Mapped[float] = mapped_column(Float, default=0.0); actual_solution: Mapped[str|None] = mapped_column(Text, nullable=True); created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now); updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
     repository: Mapped[Repository|None] = relationship(back_populates="analyses")
 
 class IncidentFeedback(Base):
@@ -58,6 +77,29 @@ class OrganizationMember(Base):
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     role: Mapped[str] = mapped_column(String(20), default=OrganizationRole.VIEWER.value)
     __table_args__=(UniqueConstraint("organization_id", "user_id", name="uq_organization_member"),)
+
+class ApiKey(Base):
+    __tablename__="api_keys"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    name: Mapped[str] = mapped_column(String(120), default="API Key")
+    role: Mapped[str] = mapped_column(String(20), default=OrganizationRole.DEVELOPER.value, index=True)
+    key_hash: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    created_by_user_id: Mapped[str|None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    expires_at: Mapped[datetime|None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    revoked_at: Mapped[datetime|None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    last_used_at: Mapped[datetime|None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+
+class ApiUsageLog(Base):
+    __tablename__="api_usage_logs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    api_key_id: Mapped[str] = mapped_column(ForeignKey("api_keys.id"), index=True)
+    organization_id: Mapped[str|None] = mapped_column(ForeignKey("organizations.id"), nullable=True, index=True)
+    method: Mapped[str] = mapped_column(String(12), index=True)
+    endpoint: Mapped[str] = mapped_column(String(500), default="/")
+    status_code: Mapped[int] = mapped_column(default=200, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
 
 class RefreshToken(Base):
     __tablename__="refresh_tokens"

@@ -42,3 +42,37 @@ class InvitationCreate(BaseModel):
 
 class MemberUpdate(BaseModel):
     role: str
+
+class WorkflowRunOut(BaseModel):
+    id: str
+    repository_id: str
+    github_run_id: str
+    github_run_url: str
+    workflow_name: str
+    branch: str
+    head_sha: str
+    status: str
+    conclusion: str
+    created_at: str
+    updated_at: str
+
+class ApiKeyCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    role: str = "DEVELOPER"
+    expires_in_days: int = Field(default=30, ge=1, le=3650)
+
+class ApiKeyOut(BaseModel):
+    id: str
+    name: str
+    role: str
+    organization_id: str
+    created_at: str
+    expires_at: str | None = None
+    revoked: bool = False
+
+class ApiKeyUsageItem(BaseModel):
+    id: str
+    method: str
+    endpoint: str
+    status_code: int
+    created_at: str

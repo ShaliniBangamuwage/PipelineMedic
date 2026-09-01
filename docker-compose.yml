@@ -6,6 +6,7 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     ports: ["5432:5432"]
+    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d pipelinemedic"]
       interval: 5s
@@ -14,19 +15,50 @@ services:
   redis:
     image: redis:7-alpine
     ports: ["6379:6379"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
   backend:
     build: ./apps/backend
     environment:
       DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/pipelinemedic
       FRONTEND_URL: http://localhost
       REDIS_URL: redis://redis:6379/0
+      PYTHONPATH: /app
     ports: ["8000:8000"]
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/health', timeout=3).status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+  worker:
+    build: ./apps/backend
+    command: ["python", "-m", "app.worker"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/pipelinemedic
+      FRONTEND_URL: http://localhost
+      REDIS_URL: redis://redis:6379/0
+      PYTHONPATH: /app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
         condition: service_started
+    restart: unless-stopped
   frontend:
     build: ./apps/frontend
     ports: ["80:80"]
     depends_on: [backend]
+    restart: unless-stopped

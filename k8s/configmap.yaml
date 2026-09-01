@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pipelinemedic-config
+  namespace: pipelinemedic
+data:
+  APP_NAME: "PipelineMedic"
+  APP_ENV: "production"
+  DEBUG: "false"
+  API_PREFIX: "/api"
+  FRONTEND_URL: "http://pipelinemedic.local"
+  GROQ_MODEL: "openai/gpt-oss-120b"
+  AI_ENABLED: "false"
+  MAX_LOG_SIZE_BYTES: "5000000"
+  MAX_AI_LOG_CHARACTERS: "30000"
+  GITHUB_LOG_MAX_BYTES: "10000000"
+  ACCESS_TOKEN_MINUTES: "15"
+  REFRESH_TOKEN_DAYS: "30"
+  AUTH_ENABLED: "true"
+  EXPOSE_INVITATION_URLS: "false"
+  REDIS_QUEUE_NAME: "pipelinemedic:jobs"
+  WORKER_MAX_ATTEMPTS: "3"
+  WORKER_BACKOFF_SECONDS: "1"
+  PATCH_GENERATION_ENABLED: "false"
+  PATCH_MAX_FILES: "10"
+  PATCH_MAX_CHANGED_LINES: "200"
+  PATCH_MAX_BYTES: "100000"
+  PATCH_ALLOWED_EXTENSIONS: ".py,.ts,.tsx,.js,.jsx,.java,.go,.cs,.md"
+  PATCH_CONTEXT_MAX_BYTES: "200000"
+  DATABASE_URL: "postgresql+psycopg://postgres:postgres@postgres:5432/pipelinemedic"
+  REDIS_URL: "redis://redis:6379/0"

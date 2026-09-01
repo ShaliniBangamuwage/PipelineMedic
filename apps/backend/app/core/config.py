@@ -20,10 +20,14 @@ class Settings(BaseSettings):
     refresh_token_days: int = 30
     auth_enabled: bool = False
     expose_invitation_urls: bool = False
+    api_key_rate_limit_per_minute: int = 60
+    api_key_rate_limit_window_seconds: int = 60
+    api_key_default_expiry_days: int = 30
     redis_url: str = ""
     redis_queue_name: str = "pipelinemedic:jobs"
     worker_max_attempts: int = 3
     worker_backoff_seconds: float = 1.0
+    worker_max_backoff_seconds: float = 300.0
     patch_generation_enabled: bool = False
     patch_max_files: int = 10
     patch_max_changed_lines: int = 200

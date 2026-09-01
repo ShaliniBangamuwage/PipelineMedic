@@ -3,13 +3,23 @@ import hmac
 import json
 import threading
 from datetime import datetime, timedelta, timezone
+
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from app.main import app
 from app.core.config import settings
 from app.db import SessionLocal
 from app.models import FailureAnalysis, Repository, WorkflowRun, Job
+import app.worker as worker_module
 from app.worker import _claim
+
+@pytest.fixture(autouse=True)
+def disable_auth(monkeypatch):
+    monkeypatch.setattr(settings, 'auth_enabled', False)
+    monkeypatch.setattr(settings, 'jwt_secret', 'phase-two-test-secret-that-is-long-enough-123456')
+    yield
+    monkeypatch.setattr(settings, 'auth_enabled', False)
 
 client=TestClient(app)
 
@@ -63,6 +73,38 @@ def test_workflow_job_failure_webhook_persists_and_queues(monkeypatch):
         assert job is not None
         assert job.kind == 'ANALYZE_WORKFLOW_RUN'
     monkeypatch.setattr(settings, 'github_webhook_secret', '')
+
+
+def test_inline_worker_uses_real_job_handler():
+    with SessionLocal() as db:
+        repo = Repository(owner='inline-owner', name='inline-repo', default_branch='main')
+        db.add(repo)
+        db.commit(); db.refresh(repo)
+        run = WorkflowRun(
+            repository_id=repo.id,
+            github_run_id='inline-run-999',
+            github_run_url='https://github.example/runs/inline-run-999',
+            workflow_name='CI',
+            branch='main',
+            head_sha='inline-sha-999',
+            status='completed',
+            conclusion='failure',
+            raw_payload='{}',
+        )
+        db.add(run)
+        db.commit(); db.refresh(run)
+        job = Job(kind='ANALYZE_WORKFLOW_RUN', status='QUEUED', workflow_run_id='inline-run-999', organization_id=None)
+        db.add(job)
+        db.commit(); db.refresh(job)
+
+    assert worker_module.run_once() is True
+
+    with SessionLocal() as db:
+        refreshed = db.get(Job, job.id)
+        assert refreshed is not None
+        assert refreshed.status == 'COMPLETED'
+        analysis = db.scalar(select(FailureAnalysis).where(FailureAnalysis.commit_sha == 'inline-sha-999', FailureAnalysis.workflow_name == 'CI', FailureAnalysis.source == 'GITHUB'))
+        assert analysis is not None
 
 
 def test_workflow_run_endpoints_and_dashboard_trends():
@@ -218,6 +260,3 @@ def test_failed_permanent_job_retry_endpoint_and_queue_status():
     assert 'pending' in queue_status.json()
     assert 'failedPermanent' in queue_status.json()
 
-
-def test_intentional_failure_for_webhook_testing():
-    assert False, "Intentional failure to test PipelineMedic webhook pipeline - will be reverted immediately after verification"
