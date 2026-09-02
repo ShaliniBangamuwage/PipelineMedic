@@ -361,9 +361,10 @@ def resolve(analysis_id: str, payload: ResolveCreate | None = None, db: Session 
     item = db.scalar(select(FailureAnalysis).where(FailureAnalysis.id == analysis_id, FailureAnalysis.organization_id == context[1])) if context[1] else db.get(FailureAnalysis, analysis_id)
     if not item: raise HTTPException(404, "Analysis not found")
     item.resolved = True
+    created_at = item.created_at.replace(tzinfo=timezone.utc) if item.created_at.tzinfo is None else item.created_at
     if item.analysis_time_minutes <= 0:
-        item.analysis_time_minutes = max((datetime.now(timezone.utc) - item.created_at).total_seconds() / 60.0, 0.0)
-    item.resolution_time_minutes = max((datetime.now(timezone.utc) - item.created_at).total_seconds() / 60.0, 0.0)
+        item.analysis_time_minutes = max((datetime.now(timezone.utc) - created_at).total_seconds() / 60.0, 0.0)
+    item.resolution_time_minutes = max((datetime.now(timezone.utc) - created_at).total_seconds() / 60.0, 0.0)
     if payload: item.actual_solution = payload.actual_solution
     db.commit(); db.refresh(item)
     return out(item)

@@ -21,7 +21,7 @@ def process_log(text: str, max_bytes: int = 5_000_000, max_chars: int = 30_000):
     seen=set()
     for line in collapsed:
         candidate=line.strip()
-        if candidate and re.search(r"(?i)(error|failed|failure|exception|fatal|denied|timeout|not found|assertion|traceback|npm err|migration)", candidate) and candidate not in seen:
+        if candidate and re.search(r"(?i)(error|failed|failure|exception|fatal|denied|timeout|not found|assertion|traceback|npm err|migration|TS\d+|TypeScript)", candidate) and candidate not in seen:
             important.append(candidate)
             seen.add(candidate)
     return {"cleaned_log": cleaned, "evidence": important[:30], "ai_log": cleaned[:max_chars]}

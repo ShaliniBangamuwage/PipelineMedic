@@ -12,6 +12,10 @@ def test_classifier_detects_typescript():
     assert result["category"] == "COMPILATION_ERROR"
     assert result["confidence"] > .9
 
+def test_processing_keeps_bare_typescript_diagnostics_as_evidence():
+    result=process_log("TS2322: Type string is not assignable")
+    assert result["evidence"] == ["TS2322: Type string is not assignable"]
+
 def test_classifier_falls_back_to_unknown():
     assert analyze("nothing", [])["category"] == "UNKNOWN"
 
