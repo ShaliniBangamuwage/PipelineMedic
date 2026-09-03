@@ -75,11 +75,11 @@ def _claim(job_id: str) -> Job | None:
 def process_job(job_id: str, handler: Callable[[Job], None]) -> str | None:
     claimed = _claim(job_id)
     if not claimed:
-        logger.info("job_claim_skipped", extra={"job_id": job_id, "status": "claim_skipped"})
+        logger.info("job claim skipped: id=%s", job_id)
         return None
     started_at = datetime.now(timezone.utc)
     lock_token = acquire_distributed_lock(job_id)
-    logger.info("job_state_transition", extra={"job_id": job_id, "kind": claimed.kind, "attempts": claimed.attempts, "from_status": "QUEUED_OR_RETRYING", "to_status": JobStatus.RUNNING.value, "event": "claimed", "lock_acquired": lock_token is not None})
+    logger.info("job claimed: id=%s kind=%s attempts=%s lock_acquired=%s", job_id, claimed.kind, claimed.attempts, lock_token is not None)
     try:
         handler(claimed)
     except PermanentJobError as error:
@@ -90,7 +90,7 @@ def process_job(job_id: str, handler: Callable[[Job], None]) -> str | None:
                 job.error_message = redact_error(error)
                 job.next_retry_at = None
                 db.commit()
-                logger.info("job_state_transition", extra={"job_id": job_id, "kind": job.kind, "attempts": job.attempts, "from_status": JobStatus.RUNNING.value, "to_status": JobStatus.FAILED_PERMANENT.value, "event": "failed_permanent", "duration_ms": int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)})
+                logger.info("job failed permanently: id=%s kind=%s attempts=%s", job_id, job.kind, job.attempts)
                 return job.status
     except Exception as error:
         with SessionLocal() as db:
@@ -100,7 +100,7 @@ def process_job(job_id: str, handler: Callable[[Job], None]) -> str | None:
             if retry(job):
                 job.error_message = redact_error(error)
                 db.commit()
-                logger.info("job_state_transition", extra={"job_id": job_id, "kind": job.kind, "attempts": job.attempts, "from_status": JobStatus.RUNNING.value, "to_status": job.status, "event": "retry_scheduled", "duration_ms": int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)})
+                logger.info("job retry scheduled: id=%s kind=%s attempts=%s", job_id, job.kind, job.attempts)
                 try:
                     publish(job.id)
                 except Exception:
@@ -110,7 +110,7 @@ def process_job(job_id: str, handler: Callable[[Job], None]) -> str | None:
             job.error_message = redact_error(error)
             job.next_retry_at = None
             db.commit()
-            logger.info("job_state_transition", extra={"job_id": job_id, "kind": job.kind, "attempts": job.attempts, "from_status": JobStatus.RUNNING.value, "to_status": JobStatus.FAILED_PERMANENT.value, "event": "dead_lettered", "duration_ms": int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)})
+            logger.info("job failed permanently: id=%s kind=%s attempts=%s", job_id, job.kind, job.attempts)
             return job.status
     finally:
         release_distributed_lock(job_id, lock_token)
@@ -121,7 +121,7 @@ def process_job(job_id: str, handler: Callable[[Job], None]) -> str | None:
             job.error_message = None
             job.next_retry_at = None
             db.commit()
-            logger.info("job_state_transition", extra={"job_id": job_id, "kind": job.kind, "attempts": job.attempts, "from_status": JobStatus.RUNNING.value, "to_status": JobStatus.COMPLETED.value, "event": "completed", "duration_ms": int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)})
+            logger.info("job completed: id=%s kind=%s attempts=%s", job_id, job.kind, job.attempts)
             return job.status
     return None
 
@@ -242,6 +242,8 @@ def handle_analyze_workflow_run(job: Job, db, github_client=None):
     queue_delivery(db, item, repository)
 
 def main():
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s', force=True)
+    logger.setLevel(logging.INFO)
     stopping = False
     def stop(*_):
         nonlocal stopping

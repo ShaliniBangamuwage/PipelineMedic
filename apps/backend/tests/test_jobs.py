@@ -3,6 +3,7 @@ from app.models import Job
 from app.services.jobs import JobStatus, retry
 from app.services.jobs import redact_error
 from app.worker import worker_health, process_job
+from app.core.config import settings
 
 
 def test_retry_transitions_and_exhaustion():
@@ -12,7 +13,8 @@ def test_retry_transitions_and_exhaustion():
     assert retry(job,3) and job.attempts==3
     assert not retry(job,3) and job.status==JobStatus.FAILED_PERMANENT.value
 
-def test_worker_health_reports_inline_mode_without_secrets():
+def test_worker_health_reports_inline_mode_without_secrets(monkeypatch):
+    monkeypatch.setattr(settings, 'redis_url', '')
     health = worker_health()
     assert health['mode'] == 'inline'
     assert 'redis_url' not in str(health).lower()
