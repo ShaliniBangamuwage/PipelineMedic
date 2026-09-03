@@ -32,7 +32,7 @@ class OpenAICompatiblePatchProvider(PatchProvider):
         except (TimeoutError, ConnectionError) as error:
             raise PatchTemporaryError("Patch provider temporarily unavailable") from error
         except Exception as error:
-            raise PatchProviderError("Patch provider unavailable") from error
+            raise PatchProviderError(f"Patch provider unavailable: {error}") from error
 
 def generate_and_validate(provider: PatchProvider, source_context: str, failure: str):
     result = provider.generate(source_context, failure)
