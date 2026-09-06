@@ -18,8 +18,18 @@ _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@")
 _PATH = re.compile(r"^(?:---|\+\+\+) (?:a/|b/)?(.+)$", re.MULTILINE)
 _SECRET_LINE = re.compile(r"(?i)(ghp_[a-z0-9]{8,}|github_pat_[a-z0-9_]{8,}|-----begin (?:rsa|openssh|ec) private key-----|(?:token|secret|password|api[_-]?key)\s*[=:])")
 
+def _normalize_diff(diff: str) -> str:
+    if "diff --git " in diff:
+        return diff
+    headers = re.findall(r"^(?:---|\+\+\+) (?:a/|b/)?(.+)$", diff, re.MULTILINE)
+    if len(headers) < 2 or headers[0] != headers[1]:
+        return diff
+    path = headers[0]
+    return f"diff --git a/{path} b/{path}\n{diff}"
+
 def validate_unified_diff(diff: str, dependency_incident: bool = False) -> PatchValidation:
     errors: list[str] = []; forbidden: list[str] = []; files: list[str] = []
+    diff = _normalize_diff(diff)
     if not diff or "diff --git " not in diff or "--- " not in diff or "+++ " not in diff: errors.append("Not a unified diff")
     if "GIT binary patch" in diff or "Binary files" in diff: errors.append("Binary patches are not allowed")
     for match in _PATH.finditer(diff):

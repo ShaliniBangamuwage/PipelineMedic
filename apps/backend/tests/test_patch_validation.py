@@ -7,6 +7,11 @@ def test_valid_unified_diff():
     result = validate_unified_diff(valid())
     assert result.valid and result.affected_files == ['app.py'] and result.total_changed_lines == 2
 
+def test_accepts_unified_headers_without_git_header():
+    diff = '--- a/patch-test.py\n+++ b/patch-test.py\n@@ -1 +1,2 @@\n+undefined_variable = None\n print(undefined_variable)\n'
+    result = validate_unified_diff(diff)
+    assert result.valid and result.affected_files == ['patch-test.py']
+
 def test_rejects_prose_traversal_binary_and_env():
     assert not validate_unified_diff('just a suggestion').valid
     assert 'Forbidden file path' in validate_unified_diff(valid().replace('app.py', '../.env')).validation_errors
