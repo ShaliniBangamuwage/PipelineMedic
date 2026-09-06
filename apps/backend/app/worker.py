@@ -5,6 +5,7 @@ import re
 import logging
 from collections.abc import Callable
 from datetime import datetime, timezone
+from pathlib import PurePosixPath
 from sqlalchemy import select, text
 from app.core.config import settings
 from app.db import SessionLocal
@@ -186,7 +187,17 @@ def handle_job(job: Job, db, github_client=None, patch_provider=None):
     try:
         context, fingerprint = ("", "")
         if repository and settings.github_token:
-            paths = re.findall(r"(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:py|ts|tsx|js|jsx|java|go|cs)", analysis.cleaned_log or "")[:20]
+            paths = []
+            for path in re.findall(r"(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:py|ts|tsx|js|jsx|java|go|cs)", analysis.cleaned_log or ""):
+                parts = PurePosixPath(path).parts
+                if "runner" in parts and "work" in parts:
+                    repository_indexes = [index for index, part in enumerate(parts) if part == repository.name]
+                    if not repository_indexes:
+                        continue
+                    path = "/".join(parts[repository_indexes[-1] + 1:])
+                if path and path not in paths:
+                    paths.append(path)
+            paths = paths[:20]
             context, fingerprint = (github_client or GitHubClient(settings.github_token)).source_context(repository.owner, repository.name, paths, analysis.commit_sha, settings.patch_context_max_bytes)
         generated, validation = generate_and_validate(patch_provider or OpenAICompatiblePatchProvider(), context, analysis.root_cause)
         patch.provider, patch.model = "GROQ", settings.groq_model
