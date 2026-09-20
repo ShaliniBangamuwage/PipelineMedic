@@ -5,14 +5,23 @@ import { AuthPage, SessionGate } from './AuthPages';
 beforeEach(() => { vi.restoreAllMocks(); sessionStorage.clear(); localStorage.clear(); });
 
 describe('authentication UI', () => {
+  it('renders GitHub authentication on login and registration', () => {
+    const { unmount } = render(<AuthPage mode="login" />);
+    expect(screen.getByRole('button', { name: 'Continue with GitHub' })).toBeInTheDocument();
+    unmount();
+    render(<AuthPage mode="register" />);
+    expect(screen.getByRole('button', { name: 'Continue with GitHub' })).toBeInTheDocument();
+  });
+
   it('validates registration fields', () => {
     render(<AuthPage mode="register" />);
-    expect(screen.getByRole('button', { name: 'Register' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Create account' })).toBeDisabled();
     fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'user@example.com' } });
     fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'long-password-123' } });
-    expect(screen.getByRole('button', { name: 'Register' })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('Confirm password'), { target: { value: 'long-password-123' } });
+    expect(screen.getByRole('button', { name: 'Create account' })).toBeDisabled();
     fireEvent.change(screen.getByLabelText('Organization'), { target: { value: 'Platform' } });
-    expect(screen.getByRole('button', { name: 'Register' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Create account' })).toBeEnabled();
   });
 
   it('shows failed login errors', async () => {
@@ -20,7 +29,7 @@ describe('authentication UI', () => {
     render(<AuthPage mode="login" />);
     fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'user@example.com' } });
     fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'long-password-123' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Log in' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('Invalid email or password');
   });
 

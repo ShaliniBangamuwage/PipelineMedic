@@ -16,7 +16,8 @@ import { request as authenticatedRequest, setToken } from "./api/client";
 import { PRCommentSettings } from "./features/repositories/PRCommentSettings";
 import { PRCommentDeliveryPanel } from "./features/jobs/PRCommentDeliveryPanel";
 import { PatchSuggestionsPanel } from "./features/patches/PatchSuggestionsPanel";
-const API = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api";
+import { RepositoryManagement } from "./features/repositories/RepositoryManagement";
+const API = import.meta.env.VITE_API_BASE_URL || "/api";
 const AUTH_ENABLED = import.meta.env.VITE_AUTH_ENABLED === "true";
 export let accessToken = "";
 export function setAccessToken(token: string) {
@@ -38,16 +39,14 @@ type Analysis = {
   evidence: string[];
   cleanedLog: string;
   resolved: boolean;
+  status?: string;
+  occurrenceCount?: number;
+  firstSeen?: string | null;
+  lastSeen?: string | null;
+  resolvedAt?: string | null;
+  resolutionNote?: string | null;
+  actualSolution?: string | null;
   createdAt: string;
-};
-type Repo = {
-  id: string;
-  owner: string;
-  name: string;
-  fullName: string;
-  defaultBranch: string;
-  active: boolean;
-  failureCount: number;
 };
 const api = authenticatedRequest;
 function useData<T>(path: string, fallback: T) {
@@ -348,6 +347,7 @@ function Detail({ id, go }: { id: string; go: (to: string) => void }) {
       </section>
     );
   const report = item.data;
+  const statusLabel = report.status || (report.resolved ? "RESOLVED" : "OPEN");
   const send = async () => {
     if (!choice) {
       setMessage("Choose accurate or inaccurate.");
@@ -391,6 +391,26 @@ function Detail({ id, go }: { id: string; go: (to: string) => void }) {
         <span className="tag">{report.severity}</span>
       </div>
       <div className="panel prose">
+        <p className="kicker">STATUS</p>
+        <h3>{statusLabel}</h3>
+        <div className="setting">
+          <span>Recurring failures</span>
+          <strong>{report.occurrenceCount ?? 1}</strong>
+        </div>
+        <div className="setting">
+          <span>First seen</span>
+          <span>{report.firstSeen ? new Date(report.firstSeen).toLocaleString() : "Not recorded"}</span>
+        </div>
+        <div className="setting">
+          <span>Last seen</span>
+          <span>{report.lastSeen ? new Date(report.lastSeen).toLocaleString() : "Not recorded"}</span>
+        </div>
+        <div className="setting">
+          <span>Resolved at</span>
+          <span>{report.resolvedAt ? new Date(report.resolvedAt).toLocaleString() : "Still open"}</span>
+        </div>
+      </div>
+      <div className="panel prose">
         <p className="kicker">ROOT CAUSE</p>
         <h3>{report.rootCause}</h3>
         <p>
@@ -401,6 +421,13 @@ function Detail({ id, go }: { id: string; go: (to: string) => void }) {
         <p className="kicker">CLEANED LOG</p>
         <pre>{report.cleanedLog}</pre>
       </div>
+      {(report.resolutionNote || report.actualSolution) && (
+        <div className="panel prose">
+          <p className="kicker">PREVIOUS RESOLUTION</p>
+          {report.resolutionNote && <p>{report.resolutionNote}</p>}
+          {report.actualSolution && <p><b>Actual solution:</b> {report.actualSolution}</p>}
+        </div>
+      )}
       <div className="panel form-panel">
         <h3>Was this analysis accurate?</h3>
         {message && <Notice text={message} />}
@@ -481,152 +508,71 @@ function History({ go }: { go: (to: string) => void }) {
   );
 }
 function Repositories({ go }: { go: (to: string) => void }) {
-  const list = useData<{ items: Repo[] }>("/repositories", { items: [] });
-  const [form, setForm] = useState({ owner: "", name: "", branch: "main" });
-  const [edit, setEdit] = useState<string | null>(null);
-  const [message, setMessage] = useState("");
-  const [busy, setBusy] = useState(false);
-  const save = async () => {
-    if (
-      !/^[A-Za-z0-9_.-]+$/.test(form.owner) ||
-      !/^[A-Za-z0-9_.-]+$/.test(form.name) ||
-      !form.branch.trim()
-    ) {
-      setMessage("Use valid owner, repository, and branch values.");
+  return <RepositoryManagement go={go} />;
+}
+export function ThemeToggle({ compact = false }: { compact?: boolean } = {}) {
+  const [theme, setTheme] = useState(() => {
+    try {
+      return localStorage.getItem("pipelinemedic.theme") || "dark";
+    } catch {
+      return "dark";
+    }
+  });
+
+  useEffect(() => {
+    const mediaQuery = typeof window !== "undefined" && typeof window.matchMedia === "function"
+      ? window.matchMedia("(prefers-color-scheme: light)")
+      : null;
+
+    const applyTheme = (nextTheme: string) => {
+      const resolvedTheme = nextTheme === "system"
+        ? (mediaQuery?.matches ? "light" : "dark")
+        : nextTheme;
+
+      document.documentElement.dataset.theme = resolvedTheme;
+    };
+
+    applyTheme(theme);
+
+    if (theme !== "system") {
+      try {
+        localStorage.setItem("pipelinemedic.theme", theme);
+      } catch {
+        // Ignore storage failures in restricted environments.
+      }
       return;
     }
-    setBusy(true);
+
+    const onSystemThemeChange = () => applyTheme("system");
+    mediaQuery?.addEventListener?.("change", onSystemThemeChange);
+
     try {
-      await api(edit ? `/repositories/${edit}` : "/repositories", {
-        method: edit ? "PATCH" : "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(
-          edit
-            ? { default_branch: form.branch }
-            : {
-                owner: form.owner,
-                name: form.name,
-                default_branch: form.branch,
-              },
-        ),
-      });
-      list.reload();
-      setMessage("Repository saved.");
-    } catch (e) {
-      setMessage(e instanceof Error ? e.message : "Repository save failed");
-    } finally {
-      setBusy(false);
+      localStorage.setItem("pipelinemedic.theme", theme);
+    } catch {
+      // Ignore storage failures in restricted environments.
     }
-  };
-  const toggle = async (repo: Repo) => {
-    if (
-      !window.confirm(
-        `${repo.active ? "Deactivate" : "Activate"} ${repo.fullName}?`,
-      )
-    )
-      return;
-    setBusy(true);
-    try {
-      await api(`/repositories/${repo.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ active: !repo.active }),
-      });
-      list.reload();
-    } catch (e) {
-      setMessage(e instanceof Error ? e.message : "Repository update failed");
-    } finally {
-      setBusy(false);
-    }
-  };
+
+    return () => {
+      mediaQuery?.removeEventListener?.("change", onSystemThemeChange);
+    };
+  }, [theme]);
+
   return (
-    <section className="content">
-      <div className="panel form-panel">
-        <h3>{edit ? "Edit repository" : "Add repository"}</h3>
-        {message && <Notice text={message} />}
-        <div className="form-grid">
-          <label>
-            Owner
-            <input
-              disabled={Boolean(edit)}
-              value={form.owner}
-              onChange={(e) => setForm({ ...form, owner: e.target.value })}
-            />
-          </label>
-          <label>
-            Repository
-            <input
-              disabled={Boolean(edit)}
-              value={form.name}
-              onChange={(e) => setForm({ ...form, name: e.target.value })}
-            />
-          </label>
-          <label>
-            Default branch
-            <input
-              value={form.branch}
-              onChange={(e) => setForm({ ...form, branch: e.target.value })}
-            />
-          </label>
-        </div>
-        <button className="primary" disabled={busy} onClick={save}>
-          {busy ? "Saving..." : "Save repository"}
-        </button>
-      </div>
-      {list.error && <Notice text="Could not load repositories." />}
-      <div className="panel table">
-        {list.loading ? (
-          <div className="empty">Loading repositories...</div>
-        ) : list.data.items.length ? (
-          list.data.items.map((repo) => (
-            <div className="failure-row" key={repo.id}>
-              <span className="row-main">
-                <strong>{repo.fullName}</strong>
-                <small>
-                  {repo.defaultBranch} · {repo.failureCount} failures
-                </small>
-              </span>
-              <button
-                className="ghost"
-                disabled={busy}
-                onClick={() => {
-                  setEdit(repo.id);
-                  setForm({
-                    owner: repo.owner,
-                    name: repo.name,
-                    branch: repo.defaultBranch,
-                  });
-                }}
-              >
-                Edit
-              </button>
-              <button className="ghost" onClick={() => go(`/repositories/${repo.id}/pr-comments`)}>
-                PR comments
-              </button>
-              <button
-                className="ghost"
-                disabled={busy}
-                onClick={() => toggle(repo)}
-              >
-                {repo.active ? "Deactivate" : "Activate"}
-              </button>
-              <button
-                className="ghost"
-                aria-label="Deactivate repository"
-                disabled={busy}
-                onClick={() => toggle(repo)}
-              >
-                <Trash2 size={15} />
-              </button>
-            </div>
-          ))
-        ) : (
-          <div className="empty">No repositories connected.</div>
-        )}
-      </div>
-    </section>
+    <label className="theme-toggle">
+      {!compact && <span>Theme preference</span>}
+      <select
+        aria-label={compact ? "Header theme" : "Theme preference"}
+        value={theme}
+        onChange={(event) => setTheme(event.target.value)}
+      >
+        <option value="dark">Dark</option>
+        <option value="light">Light</option>
+        <option value="system">System</option>
+      </select>
+    </label>
   );
 }
+
 function SettingsPage() {
   return (
     <section className="content">
@@ -634,8 +580,18 @@ function SettingsPage() {
         <h3>Integration settings</h3>
         <p>Demo mode is active without external credentials.</p>
         <p>
+          GitHub PATs are configured per repository. For real repos, generate a personal access token at GitHub with repository and workflow access, then paste it in the repository settings form.
+        </p>
+        <p>
           Webhook: <code>{API}/webhooks/github</code>
         </p>
+        <p>
+          Planned next enhancement: a full GitHub App integration with one-click installation and no manual token setup. Today, personal access tokens are used per repository.
+        </p>
+      </div>
+      <div className="panel prose settings-panel">
+        <h3>Appearance</h3>
+        <ThemeToggle />
       </div>
     </section>
   );
