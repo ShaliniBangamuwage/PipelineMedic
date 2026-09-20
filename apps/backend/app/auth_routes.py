@@ -1,13 +1,21 @@
+from base64 import urlsafe_b64encode
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from urllib.parse import urlencode
+import hashlib
+import hmac
 import jwt
+import httpx
+import secrets
 import time
 from app.core.config import settings
 from app.db import get_db
-from app.models import OrganizationMember, User
-from app.services.auth import access_token, consume_refresh, create_account, issue_refresh, verify_password
+from app.models import OAuthLoginState, Organization, OrganizationMember, OrganizationRole, User
+from app.services.auth import access_token, consume_refresh, create_account, hash_password, issue_refresh, organization_slug, verify_password
 
 router=APIRouter(prefix="/api/auth")
 _login_attempts: dict[str,list[float]]={}
@@ -18,6 +26,73 @@ def check_rate_limit(key:str):
 class Register(BaseModel): email: EmailStr; password: str=Field(min_length=12); organization: str=Field(min_length=2,max_length=120)
 class Login(BaseModel): email: EmailStr; password: str
 class Refresh(BaseModel): refresh_token: str
+
+OAUTH_STATE_COOKIE = "github_oauth_state"
+
+def _frontend_base() -> str:
+    return (settings.frontend_url or "http://localhost").split(",", 1)[0].strip().rstrip("/")
+
+def _oauth_error(code: str) -> RedirectResponse:
+    return RedirectResponse(f"{_frontend_base()}/login?{urlencode({'github_error': code})}", status_code=303)
+
+def _github_configured() -> bool:
+    return bool(settings.github_oauth_client_id and settings.github_oauth_client_secret and settings.github_oauth_callback_url)
+
+def _github_exchange(code: str, code_verifier: str) -> str:
+    response = httpx.post(
+        "https://github.com/login/oauth/access_token",
+        data={"client_id": settings.github_oauth_client_id, "client_secret": settings.github_oauth_client_secret,
+              "code": code, "redirect_uri": settings.github_oauth_callback_url, "code_verifier": code_verifier},
+        headers={"Accept": "application/json"}, timeout=15.0,
+    )
+    if response.status_code >= 400:
+        raise ValueError("GitHub token exchange failed")
+    token = response.json().get("access_token")
+    if not token:
+        raise ValueError("GitHub token exchange failed")
+    return token
+
+def _github_identity(token: str) -> tuple[str, str, str]:
+    headers = {"Accept": "application/vnd.github+json", "Authorization": f"Bearer {token}", "X-GitHub-Api-Version": "2022-11-28"}
+    response = httpx.get("https://api.github.com/user", headers=headers, timeout=15.0)
+    if response.status_code >= 400:
+        raise ValueError("Unable to verify GitHub account")
+    profile = response.json()
+    email = profile.get("email")
+    if not email:
+        emails = httpx.get("https://api.github.com/user/emails", headers=headers, timeout=15.0)
+        if emails.status_code < 400:
+            verified = [item for item in emails.json() if item.get("verified")]
+            primary = next((item for item in verified if item.get("primary")), None)
+            email = (primary or (verified[0] if verified else {})).get("email")
+    if not profile.get("id") or not profile.get("login") or not email:
+        raise ValueError("GitHub account must provide a verified email address")
+    return str(profile["id"]), str(profile["login"]), str(email).lower()
+
+def _github_user(db: Session, github_id: str, login: str, email: str) -> User:
+    user = db.scalar(select(User).where(User.github_user_id == github_id))
+    if user:
+        user.github_login = login
+        return user
+    user = db.scalar(select(User).where(User.email == email))
+    if user:
+        if user.github_user_id and user.github_user_id != github_id:
+            raise ValueError("This email is already linked to another GitHub account")
+        user.github_user_id = github_id
+        user.github_login = login
+        return user
+    user = User(email=email, password_hash=hash_password(secrets.token_urlsafe(32)), github_user_id=github_id, github_login=login)
+    db.add(user)
+    db.flush()
+    name = f"{login}'s Workspace"
+    slug = organization_slug(name)
+    if db.scalar(select(Organization).where(Organization.slug == slug)):
+        slug = f"{slug}-{user.id[:8]}"
+    org = Organization(name=name, slug=slug)
+    db.add(org)
+    db.flush()
+    db.add(OrganizationMember(user_id=user.id, organization_id=org.id, role=OrganizationRole.OWNER.value))
+    return user
 
 def tokens(response:Response,db:Session,user:User):
     refresh=issue_refresh(db,user.id); db.commit(); response.set_cookie("refresh_token",refresh,httponly=True,secure=settings.app_env=="production",samesite="lax",max_age=settings.refresh_token_days*86400); return {"access_token":access_token(user.id),"token_type":"bearer"}
@@ -42,6 +117,54 @@ def logout(request:Request,response:Response,db:Session=Depends(get_db)):
     raw=request.cookies.get("refresh_token")
     if raw: consume_refresh(db,raw); db.commit()
     response.delete_cookie("refresh_token"); return {"ok":True}
+
+@router.get("/github")
+def github_start(db: Session = Depends(get_db)):
+    if not _github_configured():
+        raise HTTPException(503, "GitHub authentication is not configured")
+    state = secrets.token_urlsafe(32)
+    verifier = secrets.token_urlsafe(48)
+    challenge = urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    db.add(OAuthLoginState(state_hash=hashlib.sha256(state.encode()).hexdigest(), code_verifier=verifier,
+                           expires_at=datetime.now(timezone.utc) + timedelta(seconds=settings.github_oauth_state_ttl_seconds)))
+    db.commit()
+    params = {"client_id": settings.github_oauth_client_id, "redirect_uri": settings.github_oauth_callback_url,
+              "scope": "read:user user:email", "state": state, "code_challenge": challenge, "code_challenge_method": "S256"}
+    response = RedirectResponse("https://github.com/login/oauth/authorize?" + urlencode(params), status_code=307)
+    response.set_cookie(OAUTH_STATE_COOKIE, state, httponly=True, secure=settings.is_production, samesite="lax", max_age=settings.github_oauth_state_ttl_seconds)
+    return response
+
+@router.get("/github/callback")
+def github_callback(code: str | None = None, state: str | None = None, error: str | None = None,
+                   request: Request = None, db: Session = Depends(get_db)):
+    if error:
+        return _oauth_error("GitHub authorization was cancelled.")
+    cookie_state = request.cookies.get(OAUTH_STATE_COOKIE) if request else None
+    print("DEBUG_GITHUB_CALLBACK", {"code": code, "state": state, "cookie_state": cookie_state, "request": bool(request)})
+    if not code or not state:
+        raise HTTPException(400, "Invalid GitHub authentication state")
+    state_hash = hashlib.sha256(state.encode()).hexdigest()
+    record = db.scalar(select(OAuthLoginState).where(OAuthLoginState.state_hash == state_hash))
+    print("DEBUG_GITHUB_RECORD", {"record_exists": bool(record), "record_state_hash": getattr(record, 'state_hash', None), "expires_at": getattr(record, 'expires_at', None), "used_at": getattr(record, 'used_at', None)})
+    if cookie_state is not None and not hmac.compare_digest(state, cookie_state):
+        raise HTTPException(400, "Invalid GitHub authentication state")
+    expires_at = record.expires_at.replace(tzinfo=timezone.utc) if record and record.expires_at.tzinfo is None else record.expires_at if record else None
+    if not record or record.used_at or not expires_at or expires_at < datetime.now(timezone.utc):
+        raise HTTPException(400, "Invalid or expired GitHub authentication state")
+    record.used_at = datetime.now(timezone.utc)
+    db.commit()
+    try:
+        token = _github_exchange(code, record.code_verifier)
+        github_id, login, email = _github_identity(token)
+        user = _github_user(db, github_id, login, email)
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        return _oauth_error(str(exc))
+    response = RedirectResponse(f"{_frontend_base()}/overview", status_code=303)
+    tokens(response, db, user)
+    response.delete_cookie(OAUTH_STATE_COOKIE)
+    return response
 @router.get("/me")
 def me(request:Request,db:Session=Depends(get_db)):
     value=request.headers.get("authorization","")

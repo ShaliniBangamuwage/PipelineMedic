@@ -117,6 +117,8 @@ def _authenticate_api_key(request: Request, db: Session) -> tuple[ApiKey, str, s
 
 def current_user(request: Request, db: Session = Depends(get_db)) -> User | None:
     if not settings.auth_enabled:
+        if settings.is_production:
+            raise HTTPException(503, "Authentication is required in production")
         return None
     header=request.headers.get("authorization", "")
     if not header:
@@ -142,7 +144,10 @@ def current_user(request: Request, db: Session = Depends(get_db)) -> User | None
 
 
 def organization_context(request: Request, db: Session = Depends(get_db), user: User | None = Depends(current_user)) -> tuple[User|None,str|None,str|None]:
-    if not settings.auth_enabled: return None, None, None
+    if not settings.auth_enabled:
+        if settings.is_production:
+            raise HTTPException(503, "Authentication is required in production")
+        return None, None, None
     api_key_context = _authenticate_api_key(request, db)
     if api_key_context is not None:
         _, organization_id, role = api_key_context
