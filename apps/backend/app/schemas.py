@@ -5,6 +5,8 @@ class RepositoryCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")
     default_branch: str = Field(default="main", min_length=1, max_length=100)
     active: bool = True
+    github_token: str | None = Field(default=None, min_length=1, max_length=500)
+    webhook_secret: str | None = Field(default=None, min_length=1, max_length=255)
 
 class RepositoryUpdate(BaseModel):
     default_branch: str | None = Field(default=None, min_length=1, max_length=100)
@@ -14,6 +16,13 @@ class RepositoryUpdate(BaseModel):
     pr_comment_allowed_branches: str | None = Field(default=None, min_length=1, max_length=1000)
     pr_comment_include_similar_incident: bool | None = None
     pr_comment_include_patch: bool | None = None
+    github_token: str | None = Field(default=None, min_length=1, max_length=500)
+    webhook_secret: str | None = Field(default=None, min_length=1, max_length=255)
+
+class RepositoryVerify(BaseModel):
+    owner: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")
+    name: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")
+    github_token: str = Field(min_length=1, max_length=500)
 
 class PRCommentSettings(BaseModel):
     pr_comments_enabled: bool
@@ -29,6 +38,7 @@ class FeedbackCreate(BaseModel):
 
 class ResolveCreate(BaseModel):
     actual_solution: str | None = None
+    resolution_note: str | None = None
 
 class OrganizationCreate(BaseModel):
     name: str = Field(min_length=2, max_length=120)

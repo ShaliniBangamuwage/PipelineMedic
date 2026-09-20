@@ -10,11 +10,13 @@ from sqlalchemy import select, text
 from app.core.config import settings
 from app.db import SessionLocal
 from app.models import FailureAnalysis, Job, PatchSuggestion, PRCommentDelivery, Repository, WorkflowRun
-from app.services.github import GitHubClient, GitHubClientError
+from app.main import resolve_repository_token
+from app.services.github import GitHubClient, GitHubClientError, GitHubPermanentError, GitHubTemporaryError
 from app.services.pr_comments import deliver
 from app.services.patch_generation import OpenAICompatiblePatchProvider, PatchProviderError, PatchTemporaryError, generate_and_validate
 from app.services.log_processing import process_log
 from app.services.ai import analyze_with_fallback
+from app.services.analyzer import analyze as rule_analyze
 from app.services.jobs import JobStatus, acquire_distributed_lock, publish, queue_depth, redact_error, redis_client, redis_health, release_distributed_lock, retry
 from app.services.pr_comments import queue_delivery
 
@@ -128,7 +130,7 @@ def process_job(job_id: str, handler: Callable[[Job], None]) -> str | None:
 
 def _process_inline_job(job: Job):
     with SessionLocal() as db:
-        handle_job(job, db, GitHubClient(settings.github_token))
+        handle_job(job, db, None)
 
 
 def run_once(handler: Callable[[Job], None] | None = None, job_id: str | None = None) -> bool:
@@ -173,7 +175,16 @@ def handle_job(job: Job, db, github_client=None, patch_provider=None):
         analysis = db.get(FailureAnalysis, delivery.analysis_id) if delivery else None
         repository = db.get(Repository, delivery.repository_id) if delivery else None
         if delivery and analysis and repository:
-            deliver(db, delivery, analysis, repository, github_client or GitHubClient(settings.github_token))
+            try:
+                token = resolve_repository_token(repository, db).strip()
+            except ValueError:
+                delivery.status = "SKIPPED"
+                delivery.last_error_code = "MISSING_CREDENTIALS"
+                delivery.last_error_message = "GitHub credentials are not configured"
+                db.commit()
+                return
+            client = github_client or GitHubClient(token)
+            deliver(db, delivery, analysis, repository, client)
         return
     if job.kind != "PATCH_GENERATION":
         return
@@ -186,7 +197,11 @@ def handle_job(job: Job, db, github_client=None, patch_provider=None):
     db.commit()
     try:
         context, fingerprint = ("", "")
-        if repository and settings.github_token:
+        try:
+            token = resolve_repository_token(repository, db).strip() if repository else ""
+        except ValueError:
+            token = ""
+        if repository and token:
             paths = []
             for path in re.findall(r"(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:py|ts|tsx|js|jsx|java|go|cs)", analysis.cleaned_log or ""):
                 parts = PurePosixPath(path).parts
@@ -198,7 +213,8 @@ def handle_job(job: Job, db, github_client=None, patch_provider=None):
                 if path and path not in paths:
                     paths.append(path)
             paths = paths[:20]
-            context, fingerprint = (github_client or GitHubClient(settings.github_token)).source_context(repository.owner, repository.name, paths, analysis.commit_sha, settings.patch_context_max_bytes)
+            client = github_client or GitHubClient(token)
+            context, fingerprint = client.source_context(repository.owner, repository.name, paths, analysis.commit_sha, settings.patch_context_max_bytes)
         generated, validation = generate_and_validate(patch_provider or OpenAICompatiblePatchProvider(), context, analysis.root_cause)
         patch.provider, patch.model = "GROQ", settings.groq_model
         patch.unified_diff, patch.explanation, patch.confidence = generated.unified_diff, generated.explanation, generated.confidence
@@ -212,44 +228,120 @@ def handle_job(job: Job, db, github_client=None, patch_provider=None):
         patch.validation_errors = json.dumps([redact_error(error)])
     db.commit()
 
+def _canonicalize_persisted_result(cleaned_log: str, evidence: list[str], result: dict) -> dict:
+    rule_result = rule_analyze(cleaned_log, evidence)
+    canonical = dict(result)
+    rule_failed_step = rule_result.get("failed_step") or rule_result.get("failedStep")
+    rule_failing_command = rule_result.get("failing_command") or rule_result.get("failingCommand")
+    if rule_failed_step and rule_failed_step != "Unknown":
+        canonical["failedStep"] = rule_failed_step
+        canonical["failed_step"] = rule_failed_step
+    if rule_failing_command:
+        canonical["failingCommand"] = rule_failing_command
+        canonical["failing_command"] = rule_failing_command
+    return canonical
+
+
 def handle_analyze_workflow_run(job: Job, db, github_client=None):
-    workflow_run = db.scalar(select(WorkflowRun).where(WorkflowRun.github_run_id == job.workflow_run_id))
+    workflow_query = select(WorkflowRun).where(
+        WorkflowRun.github_run_id == job.workflow_run_id,
+        WorkflowRun.organization_id == job.organization_id,
+    )
+    if job.run_attempt is not None:
+        workflow_query = workflow_query.where(WorkflowRun.run_attempt == job.run_attempt)
+    workflow_run = db.scalar(workflow_query)
     if not workflow_run:
         return
     repository = db.get(Repository, workflow_run.repository_id)
     if not repository:
         return
-    log = f"Workflow {workflow_run.workflow_name} failed. GitHub logs were unavailable; inspect run {workflow_run.github_run_url}."
-    if settings.github_token and workflow_run.github_run_id:
+    logger.info("Analyzing workflow job_id=%s github_run_id=%s run_attempt=%s repository_id=%s stored_workflow_id=%s", job.id, workflow_run.github_run_id, workflow_run.run_attempt, repository.id, workflow_run.id)
+    try:
+        token = resolve_repository_token(repository, db).strip()
+    except ValueError as exc:
+        raise PermanentJobError(str(exc)) from exc
+    log = ""
+    if workflow_run.github_run_id:
         try:
-            log = (github_client or GitHubClient(settings.github_token)).workflow_logs(
+            log = (github_client or GitHubClient(token)).workflow_logs(
                 repository.owner, repository.name, int(workflow_run.github_run_id), settings.github_log_max_bytes
             )
-        except (GitHubClientError, ValueError):
-            pass
+        except GitHubTemporaryError as exc:
+            logger.warning("GitHub workflow logs temporarily unavailable: job_id=%s github_run_id=%s run_attempt=%s status=retrying", job.id, workflow_run.github_run_id, workflow_run.run_attempt)
+            raise TemporaryJobError("GitHub workflow logs temporarily unavailable") from exc
+        except (GitHubPermanentError, GitHubClientError, ValueError) as exc:
+            logger.warning(
+                "GitHub workflow logs unavailable: job_id=%s github_run_id=%s run_attempt=%s reason=%s",
+                job.id,
+                workflow_run.github_run_id,
+                workflow_run.run_attempt,
+                str(exc),
+            )
+            raise PermanentJobError("GitHub workflow logs are unavailable") from exc
+    if not log.strip():
+        raise PermanentJobError("GitHub workflow logs are empty")
     processed = process_log(log, settings.max_log_size_bytes, settings.max_ai_log_characters)
     result, provider = analyze_with_fallback(processed["ai_log"], processed["evidence"])
-    sha = workflow_run.head_sha
-    name = workflow_run.workflow_name
-    if db.scalar(select(FailureAnalysis).where(FailureAnalysis.commit_sha == sha, FailureAnalysis.workflow_name == name, FailureAnalysis.source == "GITHUB")):
+    result = _canonicalize_persisted_result(processed["cleaned_log"], processed["evidence"], result)
+    logger.info(
+        "Log classification diagnostic: job_id=%s github_run_id=%s run_attempt=%s cleaned_chars=%s evidence_count=%s contains_pytest=%s contains_assertion=%s contains_exit_code=%s",
+        job.id,
+        workflow_run.github_run_id,
+        workflow_run.run_attempt,
+        len(processed["cleaned_log"]),
+        len(processed["evidence"]),
+        bool(re.search(r"(?i)pytest|short test summary info|FAILED .*::", processed["cleaned_log"])),
+        bool(re.search(r"(?i)AssertionError|assert .*==|assert .*!=", processed["cleaned_log"])),
+        bool(re.search(r"(?i)exit code|completed with exit code", processed["cleaned_log"])),
+    )
+    logger.info("Analyzer result: job_id=%s github_run_id=%s run_attempt=%s category=%s", job.id, workflow_run.github_run_id, workflow_run.run_attempt, result.get("category", "UNKNOWN"))
+    existing = db.scalar(select(FailureAnalysis).where(
+        FailureAnalysis.organization_id == workflow_run.organization_id,
+        FailureAnalysis.repository_id == repository.id,
+        FailureAnalysis.workflow_run_id == workflow_run.github_run_id,
+        FailureAnalysis.run_attempt == workflow_run.run_attempt,
+        FailureAnalysis.source == "GITHUB",
+    ))
+    if existing:
+        logger.info("Analysis already persisted: job_id=%s analysis_id=%s github_run_id=%s run_attempt=%s", job.id, existing.id, workflow_run.github_run_id, workflow_run.run_attempt)
         return
     item = FailureAnalysis(
+        organization_id=workflow_run.organization_id or repository.organization_id,
         repository_id=repository.id,
+        workflow_run_id=workflow_run.github_run_id,
+        run_attempt=workflow_run.run_attempt,
         workflow_name=workflow_run.workflow_name,
         branch=workflow_run.branch,
         commit_sha=workflow_run.head_sha,
         source="GITHUB",
         category=result["category"],
         summary=result["summary"],
-        root_cause=result.get("rootCause", ""),
-        failed_step=result.get("failedStep", "Unknown"),
+        root_cause=result.get("rootCause", result.get("root_cause", "")),
+        failed_step=result.get("failedStep", result.get("failed_step", "Unknown")),
+        failed_command=result.get("failingCommand", result.get("failing_command")),
         confidence=result["confidence"],
         severity=result["severity"],
         cleaned_log=processed["cleaned_log"],
-        raw_log_excerpt="\n".join(result.get("evidence", []))
+        raw_log_excerpt="\n".join(result.get("evidence", [])),
+        suggested_actions=json.dumps(result.get("suggestedActions", result.get("suggested_actions", [])))
     )
+    item.fingerprint = result.get("fingerprint") or result.get("fingerprint", "")
+    if not item.fingerprint:
+        from app.services.analyzer import compute_failure_fingerprint
+        item.fingerprint = compute_failure_fingerprint(
+            result.get("category", "UNKNOWN"),
+            result.get("failedStep", result.get("failed_step", "Workflow execution")),
+            result.get("errorType", "UNKNOWN"),
+            result.get("errorMessage", result.get("error_message", "")),
+            result.get("failingFile", ""),
+            result.get("failingTest", ""),
+        )
     db.add(item)
+    db.flush()
+    from app.main import synchronize_analysis_fingerprint_metadata
+    synchronize_analysis_fingerprint_metadata(db, item, item.fingerprint)
     db.commit()
+    logger.info("Analysis persisted: job_id=%s analysis_id=%s github_run_id=%s run_attempt=%s", job.id, item.id, workflow_run.github_run_id, workflow_run.run_attempt)
     queue_delivery(db, item, repository)
 
 def main():
@@ -267,7 +359,12 @@ def main():
         return
     def handle(job: Job):
         with SessionLocal() as db:
-            handle_job(job, db, GitHubClient(settings.github_token))
+            repository = db.get(Repository, job.workflow_run_id) if job.workflow_run_id else None
+            try:
+                token = resolve_repository_token(repository, db).strip() if repository else ""
+            except ValueError:
+                token = ""
+            handle_job(job, db, GitHubClient(token) if token else None)
     consume(handle, stop=lambda: stopping)
 
 if __name__ == "__main__":

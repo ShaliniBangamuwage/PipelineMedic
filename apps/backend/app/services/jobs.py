@@ -72,16 +72,16 @@ def release_distributed_lock(job_id: str, token: str | None, client=None) -> boo
     return False
 
 
-def enqueue(db:Session,kind:str,organization_id:str|None,delivery_id:str|None,run_id:str|None):
-    query=select(Job).where(Job.delivery_id==delivery_id,Job.workflow_run_id==run_id)
+def enqueue(db:Session,kind:str,organization_id:str|None,delivery_id:str|None,run_id:str|None,run_attempt:int|None=None):
+    query=select(Job).where(Job.organization_id==organization_id,Job.workflow_run_id==run_id,Job.run_attempt==run_attempt)
     existing=db.scalar(query) if delivery_id or run_id else None
     if existing:return existing,False
-    item=Job(kind=kind,organization_id=organization_id,delivery_id=delivery_id,workflow_run_id=run_id,status=JobStatus.QUEUED.value);db.add(item);db.commit();db.refresh(item)
+    item=Job(kind=kind,organization_id=organization_id,delivery_id=delivery_id,workflow_run_id=run_id,run_attempt=run_attempt,status=JobStatus.QUEUED.value);db.add(item);db.commit();db.refresh(item)
     if settings.redis_url:
         try: publish(item.id)
         except Exception: pass
     return item,True
-def out(job):return {'id':job.id,'kind':job.kind,'status':job.status,'deliveryId':job.delivery_id,'workflowRunId':job.workflow_run_id,'attempts':job.attempts,'errorCode':None,'nextRetryAt':job.next_retry_at.isoformat() if job.next_retry_at else None,'createdAt':job.created_at.isoformat() if job.created_at else None}
+def out(job):return {'id':job.id,'kind':job.kind,'status':job.status,'deliveryId':job.delivery_id,'workflowRunId':job.workflow_run_id,'runAttempt':job.run_attempt,'attempts':job.attempts,'errorCode':'PROCESSING_FAILED' if job.error_message else None,'errorMessage':job.error_message,'nextRetryAt':job.next_retry_at.isoformat() if job.next_retry_at else None,'createdAt':job.created_at.isoformat() if job.created_at else None,'updatedAt':job.updated_at.isoformat() if job.updated_at else None}
 def retry(job,max_attempts:int|None=None):
     max_attempts = max_attempts or settings.worker_max_attempts
     if job.attempts >= max_attempts:

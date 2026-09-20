@@ -42,13 +42,14 @@ def queue_delivery(db, analysis: FailureAnalysis, repository: Repository):
     existing = db.query(PRCommentDelivery).filter(PRCommentDelivery.repository_id == repository.id, PRCommentDelivery.analysis_id == analysis.id).first()
     if existing: return existing, False
     delivery = PRCommentDelivery(organization_id=analysis.organization_id, repository_id=repository.id, analysis_id=analysis.id, workflow_run_id=analysis.commit_sha, status="QUEUED")
+    token = (repository.github_token or "").strip()
     if not repository.pr_comments_enabled:
         delivery.status, delivery.last_error_code, delivery.last_error_message = "SKIPPED", "DISABLED", "PR comments are disabled"
     elif analysis.confidence < repository.pr_comment_min_confidence:
         delivery.status, delivery.last_error_code, delivery.last_error_message = "SKIPPED", "LOW_CONFIDENCE", "Analysis confidence is below the configured threshold"
     elif analysis.branch not in [branch.strip() for branch in repository.pr_comment_allowed_branches.split(",")]:
         delivery.status, delivery.last_error_code, delivery.last_error_message = "SKIPPED", "BRANCH_NOT_ALLOWED", "Analysis branch is not allowed"
-    elif not settings.github_token:
+    elif not token:
         delivery.status, delivery.last_error_code, delivery.last_error_message = "SKIPPED", "MISSING_CREDENTIALS", "GitHub credentials are not configured"
     db.add(delivery); db.flush()
     if delivery.status == "QUEUED":

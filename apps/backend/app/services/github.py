@@ -1,13 +1,19 @@
 from io import BytesIO
-from zipfile import ZipFile
+from zipfile import BadZipFile, ZipFile
 from pathlib import PurePosixPath
 import hashlib
+import logging
 import re
 import httpx
 
+logger = logging.getLogger("pipelinemedic.github")
+
 class GitHubClientError(Exception): pass
 class GitHubTemporaryError(GitHubClientError): pass
-class GitHubPermanentError(GitHubClientError): pass
+class GitHubPermanentError(GitHubClientError):
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 class GitHubClient:
     def __init__(self, token: str, client: httpx.Client | None = None):
@@ -25,10 +31,13 @@ class GitHubClient:
         if rate_limited or response.status_code in (408,) or response.status_code >= 500:
             raise GitHubTemporaryError(f"GitHub request temporarily unavailable ({response.status_code})")
         if response.status_code in (401, 403, 404, 422):
-            raise GitHubPermanentError(f"GitHub request rejected ({response.status_code})")
+            raise GitHubPermanentError(f"GitHub request rejected ({response.status_code})", response.status_code)
         if response.status_code >= 400:
             raise GitHubPermanentError("GitHub request failed")
         return response
+
+    def repository_metadata(self, owner: str, repo: str) -> dict:
+        return self._request("GET", f"https://api.github.com/repos/{owner}/{repo}").json()
 
     def pull_requests_for_run(self, owner: str, repo: str, branch: str, sha: str) -> list[dict]:
         candidates = []
@@ -75,20 +84,47 @@ class GitHubClient:
         url=f"https://api.github.com/repos/{owner}/{repo}/actions/runs/{run_id}/logs"
         try:
             response=self.client.get(url, headers=self.headers)
+            logger.info(
+                "GitHub workflow log response: run_id=%s status=%s redirect=%s",
+                run_id,
+                response.status_code,
+                response.status_code in (301, 302, 307, 308),
+            )
             if response.status_code in (301,302,307,308):
                 location=response.headers.get("location")
                 if not location: raise GitHubClientError("GitHub log redirect missing location")
                 response=self.client.get(location, headers={"Accept":"application/zip"})
-            if response.status_code in (401,403,404): raise GitHubClientError(f"GitHub log request rejected ({response.status_code})")
-            if response.status_code >= 400: raise GitHubClientError("GitHub log request failed")
+                logger.info("GitHub workflow log redirect response: run_id=%s status=%s", run_id, response.status_code)
+            if response.status_code == 429 or (response.status_code == 403 and (response.headers.get("retry-after") or response.headers.get("x-ratelimit-remaining") == "0")) or response.status_code >= 500:
+                raise GitHubTemporaryError(f"GitHub log request temporarily unavailable ({response.status_code})")
+            if response.status_code in (401,403,404):
+                logger.warning("GitHub workflow log request rejected: run_id=%s status=%s", run_id, response.status_code)
+                raise GitHubPermanentError(f"GitHub log request rejected ({response.status_code})", response.status_code)
+            if response.status_code >= 400: raise GitHubPermanentError("GitHub log request failed", response.status_code)
             if len(response.content) > max_bytes: raise GitHubClientError("GitHub log archive exceeds the configured size limit")
             with ZipFile(BytesIO(response.content)) as archive:
                 chunks=[]
+                readable_files=[]
                 for entry in archive.infolist():
                     if entry.is_dir() or not entry.filename.lower().endswith((".txt",".log")): continue
                     if PurePosixPath(entry.filename).is_absolute() or ".." in PurePosixPath(entry.filename).parts: continue
                     if entry.file_size > max_bytes: continue
+                    readable_files.append(PurePosixPath(entry.filename).name)
                     chunks.append(archive.read(entry).decode("utf-8", errors="replace"))
+                logger.info(
+                    "GitHub workflow log archive read: run_id=%s entry_count=%s txt_files=%s total_bytes=%s",
+                    run_id,
+                    len(archive.infolist()),
+                    len(readable_files),
+                    len(response.content),
+                )
+                if readable_files:
+                    logger.info("GitHub workflow log archive file names: run_id=%s files=%s", run_id, readable_files[:10])
+                if not readable_files:
+                    raise GitHubPermanentError("GitHub log archive contained no readable log files")
             return "\n".join(chunks)
+        except BadZipFile as exc:
+            logger.warning("GitHub workflow log archive was invalid: run_id=%s", run_id)
+            raise GitHubPermanentError("GitHub log archive was invalid") from exc
         except (httpx.TimeoutException, httpx.HTTPError, OSError) as exc:
-            raise GitHubClientError("GitHub log request unavailable") from exc
+            raise GitHubTemporaryError("GitHub log request unavailable") from exc
