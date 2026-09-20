@@ -23,10 +23,15 @@ services:
       retries: 10
   backend:
     build: ./apps/backend
+    env_file:
+      - ./apps/backend/.env
     environment:
       DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/pipelinemedic
-      FRONTEND_URL: http://localhost
+      FRONTEND_URL: http://localhost,http://localhost:5173
+      APP_ENV: production
       REDIS_URL: redis://redis:6379/0
+      AUTH_ENABLED: "true"
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in the root .env file}
       PYTHONPATH: /app
     ports: ["8000:8000"]
     depends_on:
@@ -44,10 +49,15 @@ services:
   worker:
     build: ./apps/backend
     command: ["python", "-m", "app.worker"]
+    env_file:
+      - ./apps/backend/.env
     environment:
       DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/pipelinemedic
-      FRONTEND_URL: http://localhost
+      FRONTEND_URL: http://localhost,http://localhost:5173
+      APP_ENV: production
       REDIS_URL: redis://redis:6379/0
+      AUTH_ENABLED: "true"
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in the root .env file}
       PYTHONPATH: /app
     depends_on:
       postgres:
@@ -56,9 +66,25 @@ services:
         condition: service_healthy
       backend:
         condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys, redis; r = redis.Redis.from_url('redis://redis:6379/0'); sys.exit(0 if r.ping() else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
     restart: unless-stopped
   frontend:
-    build: ./apps/frontend
+    build:
+      context: ./apps/frontend
+      args:
+        VITE_AUTH_ENABLED: "true"
+        VITE_API_BASE_URL: http://localhost:8000/api
     ports: ["80:80"]
     depends_on: [backend]
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/ >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
