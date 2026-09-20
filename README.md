@@ -1,113 +1,170 @@
 # PipelineMedic
 
-PipelineMedic is an AI-assisted CI/CD failure triage dashboard for extracting error evidence, classifying failed workflows, and tracking resolution. The current MVP works without external AI credentials through a deterministic rule-based analyzer.
+PipelineMedic is a multi-tenant CI/CD failure analysis platform that receives GitHub Actions failure events, processes workflow logs asynchronously, identifies likely root causes, and presents actionable failure evidence through an authenticated dashboard.
 
-## Features
+## 1. Problem
 
-- Paste or upload `.log`/`.txt` workflow output
-- ANSI/timestamp cleanup, duplicate collapse, blank-line reduction, and likely-secret redaction
-- Weighted classification for compilation, tests, dependencies, configuration, database, containers, deployment, authorization, and network failures
-- Optional Groq analysis with strict JSON validation and automatic rule-based fallback
-- GitHub workflow log archive retrieval with bounded, safe ZIP extraction
-- Persisted reports, repository management, feedback, resolution, similarity search, and signed webhook intake
-- Persisted reports, history, resolution state, dashboard metrics, and signed webhook intake
-- Responsive DevOps-style React dashboard with demo-mode labeling
+Developers often lose time triaging CI failures because the relevant signal is buried inside noisy workflow logs, rerun metadata, and multiple GitHub Actions steps. PipelineMedic addresses that by receiving workflow failure events, retrieving the log archive, extracting the evidence that matters, and classifying likely root causes before the team even opens the job details.
 
-## Status
+## 2. Features
 
-Phase 1 authentication and tenancy are implemented on the `advanced-features` branch. Set `AUTH_ENABLED=true` to require JWT authentication and organization headers; leave it false for the portfolio demo workflow.
+Implemented and verified features include:
 
-## Stack
+- GitHub Actions webhook integration for workflow failure events
+- Asynchronous job processing with Redis-backed queueing
+- GitHub Actions log retrieval and ZIP extraction with safe file selection
+- Deterministic CI failure classification with rule-based fallback
+- Unit-test failure detection for pytest-style failures
+- Failure evidence extraction and cleaned log presentation
+- Multi-tenant organization scoping for users, repositories, jobs, and analyses
+- Authenticated frontend dashboard with repository and organization management
+- Repository credential storage with write-only API behavior for PAT and webhook secret metadata
+- Run-attempt-aware persistence so reruns do not overwrite previous analysis records
+- PostgreSQL-backed persistence with Dockerized local services
 
-React + Vite + TypeScript, FastAPI, Pydantic Settings, SQLAlchemy, SQLite/PostgreSQL, Docker Compose, Pytest, and GitHub Actions.
+## 3. Architecture
 
-## Prerequisites
+```text
+GitHub Actions
+      |
+      v
+GitHub Webhook
+      |
+      v
+FastAPI Backend
+      |
+      v
+Redis Queue
+      |
+      v
+Worker
+      |
+      +--> GitHub Logs
+      |
+      v
+Analyzer
+      |
+      v
+PostgreSQL
+      |
+      v
+React Frontend
+```
 
-Node.js 22+ and npm. Python 3.12+ for local backend execution, or Docker Desktop for the Compose workflow.
+## 4. Hybrid AI Analysis
 
-## Local setup
+PipelineMedic uses a hybrid failure-analysis model:
+
+- Deterministic rule-based analysis remains the primary path and is always run first.
+- AI is an optional evidence-based fallback/enrichment layer for low-confidence or unsupported cases only.
+- The AI layer never blindly overrides strong deterministic evidence such as TypeScript compiler diagnostics, pytest failures, or configuration errors with actual supporting log lines.
+- If AI is disabled, not configured, or the provider returns malformed data, the deterministic analyzer continues working normally.
+
+Required AI settings in backend `.env`:
+
+```env
+AI_ENABLED=false
+GROQ_API_KEY=
+GROQ_MODEL=openai/gpt-oss-120b
+AI_TIMEOUT_SECONDS=15
+AI_MAX_LOG_CHARS=30000
+```
+
+Behavior:
+
+- `AI_ENABLED=false` disables provider calls entirely.
+- Missing or invalid provider config disables AI safely without blocking deterministic analysis.
+- Prompts are sanitized before being sent to the provider; tokens, PATs, bearer headers, DB URLs with passwords, webhook secrets, and private keys are redacted.
+- The AI can only suggest diagnoses supported by the sanitized evidence package; unsupported hallucinations are rejected.
+
+## 5. Tech Stack
+
+- Frontend: React, Vite, TypeScript, Vitest
+- Backend: FastAPI, SQLAlchemy, Pydantic
+- Database: PostgreSQL with SQLite fallback for local tests
+- Queue: Redis
+- CI/log processing: GitHub Actions, Python log parsing and classification
+- Containerization: Docker Compose
+
+## 6. Security / Multi-tenancy
+
+Resources are organization-scoped. Users can only access repositories, workflow runs, analyses, jobs, and settings that belong to their current organization. Stored credentials are not exposed through API responses, and PAT/webhook secret values are treated as write-only inputs.
+
+## 7. Local setup
+
+```powershell
+docker compose up --build
+```
+
+The application is available through the local Docker stack using the existing Compose configuration.
+
+For direct backend development:
 
 ```powershell
 Copy-Item apps/backend/.env.example apps/backend/.env
 Copy-Item apps/frontend/.env.example apps/frontend/.env
-Push-Location apps/backend
-py -3.12 -m venv .venv
+cd apps/backend
+python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 $env:PYTHONPATH='.'
 uvicorn app.main:app --reload --port 8000
 ```
 
-In a second terminal:
+For the frontend:
 
 ```powershell
-Push-Location apps/frontend
+cd apps/frontend
 npm install
 npm run dev
 ```
 
-Open `http://localhost:5173`. The API health endpoint is `http://localhost:8000/api/health`.
+Never commit real PATs or webhook secrets. Keep `.env` files local and untracked.
 
-With `REDIS_URL` configured, run the long-lived consumer from `apps/backend` with:
+### GitHub authentication
 
-```powershell
-$env:PYTHONPATH='.'; py -3.12 -m app.worker
+Create a GitHub OAuth App and configure its authorization callback URL as:
+
+```text
+http://localhost:8000/api/auth/github/callback
 ```
 
-Leave `REDIS_URL` empty to retain inline local/demo processing.
+Set these backend-only variables in `apps/backend/.env` (never in frontend/Vite configuration):
 
-## Docker
-
-```powershell
-docker compose up --build
+```text
+GITHUB_OAUTH_CLIENT_ID=
+GITHUB_OAUTH_CLIENT_SECRET=
+GITHUB_OAUTH_CALLBACK_URL=http://localhost:8000/api/auth/github/callback
 ```
 
-The dashboard is served at `http://localhost` and the API at `http://localhost:8000`.
+GitHub authentication requests only identity and verified-email access. It does not import repositories or replace the existing PAT-based repository connection.
 
-## Tests and builds
+## 8. Screenshots
 
-```powershell
-Push-Location apps/backend
-$env:PYTHONPATH='.'
-python -m pytest -q
-Push-Location ..\frontend
-npm run lint
-npm run type-check
-npm test
-npm run build
-```
+Planned placeholders for portfolio use:
 
-## Authentication and organizations
+- Login screen
+- Overview dashboard
+- UNIT_TEST_FAILURE detail
+- Jobs page
+- Repositories page
 
-When authentication is enabled, register at `/register`, log in at `/login`, and select an organization at `/organizations`. Access tokens stay in memory and refresh tokens are stored in an HTTP-only cookie. Repository, analysis, dashboard, feedback, and similarity queries are scoped by `X-Organization-ID`. Roles are OWNER, ADMIN, DEVELOPER, and VIEWER; mutations require the corresponding minimum role. Never use the development JWT default in a deployed environment.
+## 9. Testing
 
-## Environment
+Current verified status after final validation:
 
-Backend settings are documented in [apps/backend/.env.example](apps/backend/.env.example), including database URL, CORS origin, webhook secret, optional GitHub/Groq credentials, and log limits. Frontend settings are in [apps/frontend/.env.example](apps/frontend/.env.example). Never commit `.env` files or secrets.
+- Backend tests: 92 passed
+- Frontend tests: 25 passed
+- Frontend production build: succeeded
 
-## Documentation
+## 10. Documentation
 
-- [Architecture](docs/architecture.md)
-- [API reference](docs/api-reference.md)
-- [Database schema](docs/database-schema.md)
-- [GitHub webhook setup](docs/github-webhook-setup.md)
-- [Security](docs/security.md)
+- [docs/architecture.md](docs/architecture.md)
+- [docs/api-reference.md](docs/api-reference.md)
+- [docs/database-schema.md](docs/database-schema.md)
+- [docs/github-webhook-setup.md](docs/github-webhook-setup.md)
+- [docs/security.md](docs/security.md)
 
-## Sample analysis
-
-Use the Analyze log page and select a sample button, or paste a fixture from `samples/logs`. Reports are stored locally in `apps/backend/pipelinemedic.db` when using the default SQLite configuration.
-
-## Roadmap
-
-1. Add broader organization/member frontend administration and production observability.
-2. Add GitHub workflow-run persistence and background queue execution.
-3. Replace keyword similarity with pgvector embeddings.
-4. Add browser tests and production deployment manifests.
-
-## License
+## 11. License
 
 MIT. See [LICENSE](LICENSE).
-
-## Author
-
-PipelineMedic portfolio project by Shalini Bangamuwage.
