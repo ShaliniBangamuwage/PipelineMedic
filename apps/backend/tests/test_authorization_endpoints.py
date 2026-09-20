@@ -129,3 +129,15 @@ def test_cross_organization_analysis_feedback_resolution_similarity_dashboard_an
     from app.core.config import settings as runtime_settings
     runtime_settings.auth_enabled=False
     assert test_client.get("/api/analyses").status_code==200
+
+def test_empty_organization_overview_is_successful_and_context_is_required(client):
+    test_client, _ = client
+    token = register(test_client, "empty-dashboard@example.com", "Empty dashboard")
+    organization = org_id(test_client, token)
+    headers = auth(token, organization)
+
+    assert test_client.get("/api/dashboard/summary", headers=headers).json()["totalFailures"] == 0
+    assert test_client.get("/api/dashboard/insights", headers=headers).status_code == 200
+    assert test_client.get("/api/dashboard/trends", headers=headers).json()["series"] == []
+    assert test_client.get("/api/analyses", headers=headers).json()["items"] == []
+    assert test_client.get("/api/dashboard/summary", headers=auth(token)).status_code == 400

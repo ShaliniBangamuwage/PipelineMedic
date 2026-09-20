@@ -19,7 +19,7 @@ def session_factory(tmp_path, monkeypatch):
     return sessionmaker(bind=engine)
 
 def seed(db, enabled=True, confidence=.95, branch='main', suffix=''):
-    repo = Repository(id='repo' + suffix, owner='acme', name='app' + suffix, pr_comments_enabled=enabled, pr_comment_min_confidence=.8, pr_comment_allowed_branches='main')
+    repo = Repository(id='repo' + suffix, owner='acme', name='app' + suffix, github_token='ghp_test_repository_token', pr_comments_enabled=enabled, pr_comment_min_confidence=.8, pr_comment_allowed_branches='main')
     analysis = FailureAnalysis(id='analysis' + suffix, organization_id='org', repository_id='repo' + suffix, summary='Failure', category='UNKNOWN', severity='HIGH', confidence=confidence, root_cause='bad token=secret', failed_step='build', branch=branch, commit_sha='sha' + suffix, cleaned_log='app.py failed', raw_log_excerpt='token=secret')
     db.add_all([repo, analysis]); db.commit()
     delivery, created = queue_delivery(db, analysis, repo)
