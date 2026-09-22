@@ -79,6 +79,7 @@ export function AuthenticatedShell() {
   const [role, setRole] = useState("VIEWER");
   const [message, setMessage] = useState("");
   const [orgReady, setOrgReady] = useState(false);
+  const [workspaceSummary, setWorkspaceSummary] = useState<DashboardSummary | null>(null);
   useEffect(() => {
     Promise.all([call("/auth/me"), call("/organizations")])
       .then(([user, result]) => {
@@ -101,6 +102,15 @@ export function AuthenticatedShell() {
         setOrgReady(true);
       });
   }, []);
+  useEffect(() => {
+    if (!selected) {
+      setWorkspaceSummary(null);
+      return;
+    }
+    call("/dashboard/summary")
+      .then((result) => setWorkspaceSummary((result as DashboardSummary) || null))
+      .catch(() => setWorkspaceSummary(null));
+  }, [selected]);
   useEffect(() => {
     if (selected) localStorage.setItem("pipelinemedic.organization", selected);
     call("/auth/me")
@@ -133,6 +143,10 @@ export function AuthenticatedShell() {
     sessionStorage.clear();
     location.href = "/login";
   };
+  const workspaceName = orgs.find((org) => org.id === selected)?.name || "Current workspace";
+  const repoCount = workspaceSummary?.repositoriesMonitored ?? null;
+  const currentFailures = workspaceSummary?.unresolvedFailures ?? null;
+  const analyzedFailures = workspaceSummary?.totalFailures ?? null;
   return (
     <div className="shell">
       <aside className={mobile ? "open" : ""}>
@@ -174,6 +188,46 @@ export function AuthenticatedShell() {
             Settings
           </button>
         </nav>
+        <div className="sidebar-status">
+          <div className="sidebar-section">
+            <div className="sidebar-section-header">System Status</div>
+            <div className="status-list">
+              <div className="status-item">
+                <span className={`status-dot ${email ? "good" : "neutral"}`} />
+                <span>GitHub Connected</span>
+                <strong>{email ? "Available" : "Pending"}</strong>
+              </div>
+              <div className="status-item">
+                <span className={`status-dot ${workspaceSummary ? "good" : "neutral"}`} />
+                <span>Webhook Active</span>
+                <strong>{workspaceSummary ? "Available" : "Pending"}</strong>
+              </div>
+              <div className="status-item">
+                <span className={`status-dot ${workspaceSummary ? "good" : "neutral"}`} />
+                <span>Analysis Service</span>
+                <strong>{workspaceSummary ? "Available" : "Pending"}</strong>
+              </div>
+            </div>
+          </div>
+          <div className="sidebar-section">
+            <div className="sidebar-section-header">Current Workspace</div>
+            <div className="workspace-card">
+              <div className="workspace-name">{workspaceName}</div>
+              <div className="workspace-metric">
+                <span>Connected repos</span>
+                <strong>{repoCount !== null ? repoCount : "—"}</strong>
+              </div>
+              <div className="workspace-metric">
+                <span>Open failures</span>
+                <strong>{currentFailures !== null ? currentFailures : "—"}</strong>
+              </div>
+              <div className="workspace-metric">
+                <span>Analyzed failures</span>
+                <strong>{analyzedFailures !== null ? analyzedFailures : "—"}</strong>
+              </div>
+            </div>
+          </div>
+        </div>
         <div className="sidebar-foot">
           <ShieldCheck size={16} />
           {orgs.find((org) => org.id === selected)?.name ||
