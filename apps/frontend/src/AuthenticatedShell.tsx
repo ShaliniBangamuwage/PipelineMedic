@@ -797,28 +797,44 @@ function OrganizationWorkspace({
   );
 }
 export function InvitationAccept({ token }: { token: string }) {
-  const [state, setState] = useState("Accepting invitation...");
-  useEffect(() => {
-    call(`/invitations/${token}/accept`, { method: "POST" })
-      .then((result) => {
-        localStorage.setItem(
-          "pipelinemedic.organization",
-          result.organizationId,
-        );
-        setState("Invitation accepted.");
-        setTimeout(() => (location.href = "/organizations"), 500);
-      })
-      .catch((error) =>
-        setState(
-          error instanceof Error
-            ? error.message
-            : "Invitation is invalid or expired.",
-        ),
+  const [message, setMessage] = useState(
+    "You have been invited to join this organization.",
+  );
+  const [busy, setBusy] = useState(false);
+  const accept = async () => {
+    setBusy(true);
+    setMessage("Accepting invitation...");
+    try {
+      const result = await call(`/invitations/${token}/accept`, {
+        method: "POST",
+      });
+      localStorage.setItem("pipelinemedic.organization", result.organizationId);
+      window.dispatchEvent(new Event("pipelinemedic:organization-changed"));
+      setMessage("Invitation accepted.");
+      setTimeout(() => (location.href = "/organizations"), 500);
+    } catch (error) {
+      setBusy(false);
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Invitation is invalid or expired.",
       );
-  }, [token]);
+      return;
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
     <main className="auth-page">
-      <div className="panel empty">{state}</div>
+      <div className="panel empty">
+        <h2>Invitation</h2>
+        <p>{message}</p>
+        {!busy && message !== "Invitation accepted." && (
+          <button className="primary" onClick={accept}>
+            Accept invitation
+          </button>
+        )}
+      </div>
     </main>
   );
 }

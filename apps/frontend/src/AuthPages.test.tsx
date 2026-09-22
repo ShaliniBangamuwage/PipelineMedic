@@ -43,4 +43,10 @@ describe('authentication UI', () => {
     render(<SessionGate><div>Protected workspace</div></SessionGate>);
     expect(screen.getByText('Protected workspace')).toBeInTheDocument();
   });
+
+  it('preserves the invite route so the user can return after login', () => {
+    window.history.pushState({}, '', '/invitations/invite-token-123');
+    render(<AuthPage mode="login" />);
+    expect(sessionStorage.getItem('pipelinemedic.returnTo')).toBe('/invitations/invite-token-123');
+  });
 });

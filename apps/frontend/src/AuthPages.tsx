@@ -20,10 +20,18 @@ async function submit(path: string, payload: Record<string, string>) {
   return response.json();
 }
 
+function persistReturnTarget() {
+  const target = `${location.pathname}${location.search}${location.hash}`;
+  if (target.startsWith("/invitations/")) {
+    sessionStorage.setItem("pipelinemedic.returnTo", target);
+  }
+}
+
 export function SessionGate({ children }: { children: React.ReactNode }) {
   const [ready, setReady] = useState(!import.meta.env.VITE_AUTH_ENABLED || import.meta.env.VITE_AUTH_ENABLED !== "true");
   const [authenticated, setAuthenticated] = useState(ready);
   useEffect(() => {
+    persistReturnTarget();
     if (ready) return;
     fetch(API + "/auth/refresh", { method: "POST", credentials: "include" }).then((response) => response.ok ? response.json() : Promise.reject()).then((result) => { setAccessToken(result.access_token); setAuthenticated(true); }).catch(() => setAuthenticated(false)).finally(() => setReady(true));
   }, [ready]);
@@ -52,6 +60,9 @@ export function AuthPage({ mode }: { mode: "login" | "register" }) {
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const register = mode === "register";
+  useEffect(() => {
+    persistReturnTarget();
+  }, []);
   const run = async () => {
     if (register && password !== confirmPassword) { setError("Passwords do not match."); return; }
     setBusy(true); setError("");

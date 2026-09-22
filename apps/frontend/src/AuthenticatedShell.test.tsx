@@ -1,7 +1,7 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, expect, test, vi } from 'vitest';
 import { request } from './api/client';
-import { AuthenticatedAnalysisDetail, AuthenticatedOverview, AuthenticatedShell } from './AuthenticatedShell';
+import { AuthenticatedAnalysisDetail, AuthenticatedOverview, AuthenticatedShell, InvitationAccept } from './AuthenticatedShell';
 
 vi.mock('./api/client', () => ({ request: vi.fn() }));
 const api = vi.mocked(request);
@@ -136,4 +136,18 @@ test('renders recurring metadata and resolution status for recurring failures', 
   expect(screen.getByText('4')).toBeInTheDocument();
   expect(screen.getByText('Pin the package version')).toBeInTheDocument();
   expect(screen.getByText('Dependencies were pinned to a compatible version.')).toBeInTheDocument();
+});
+
+test('waits for an explicit accept action before accepting an invitation', async () => {
+  api.mockResolvedValue({ organizationId: 'org-123', accepted: true });
+
+  render(<InvitationAccept token="invite-token-123" />);
+
+  expect(screen.getByRole('button', { name: 'Accept invitation' })).toBeInTheDocument();
+  expect(api).not.toHaveBeenCalled();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Accept invitation' }));
+
+  await waitFor(() => expect(api).toHaveBeenCalledWith('/invitations/invite-token-123/accept', { method: 'POST' }));
+  expect(screen.getByText('Invitation accepted.')).toBeInTheDocument();
 });
