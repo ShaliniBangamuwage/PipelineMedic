@@ -19,3 +19,12 @@ def test_frontend_origins_support_comma_separated_values():
 
     assert "http://localhost:5173" in settings.frontend_origins
     assert "http://localhost:4173" in settings.frontend_origins
+
+
+def test_frontend_origin_regex_is_configurable_for_preview_deployments():
+    settings = Settings(
+        frontend_url="https://pipeline-medic.example.com",
+        frontend_origin_regex=r"https://pipeline-medic-[a-z0-9-]+\.vercel\.app",
+    )
+
+    assert settings.frontend_origin_regex == r"https://pipeline-medic-[a-z0-9-]+\.vercel\.app"

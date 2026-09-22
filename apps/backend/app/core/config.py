@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     api_prefix: str = "/api"
     database_url: str = "sqlite:///./pipelinemedic.db"
     frontend_url: str = "http://localhost:5173"
+    frontend_origin_regex: str = ""
     resend_api_key: str = ""
     resend_from_email: str = ""
     github_webhook_secret: str = ""
