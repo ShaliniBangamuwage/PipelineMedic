@@ -151,3 +151,14 @@ test('waits for an explicit accept action before accepting an invitation', async
   await waitFor(() => expect(api).toHaveBeenCalledWith('/invitations/invite-token-123/accept', { method: 'POST' }));
   expect(screen.getByText('Invitation accepted.')).toBeInTheDocument();
 });
+
+test('explains when the signed-in email cannot accept an invitation', async () => {
+  api.mockRejectedValue(new Error('Invitation email does not match current user'));
+
+  render(<InvitationAccept token="invite-token-123" />);
+  fireEvent.click(screen.getByRole('button', { name: 'Accept invitation' }));
+
+  expect(await screen.findByRole('paragraph')).toHaveTextContent(
+    'This invitation belongs to a different email address. Sign out and sign in with the invited email.',
+  );
+});

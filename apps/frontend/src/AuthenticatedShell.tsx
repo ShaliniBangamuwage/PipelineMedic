@@ -814,6 +814,10 @@ export function InvitationAccept({ token }: { token: string }) {
       setTimeout(() => (location.href = "/organizations"), 500);
     } catch (error) {
       setBusy(false);
+      if (error instanceof Error && error.message === "Invitation email does not match current user") {
+        setMessage("This invitation belongs to a different email address. Sign out and sign in with the invited email.");
+        return;
+      }
       setMessage(
         error instanceof Error
           ? error.message
