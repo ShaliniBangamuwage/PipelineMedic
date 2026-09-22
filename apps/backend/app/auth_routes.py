@@ -32,6 +32,13 @@ OAUTH_STATE_COOKIE = "github_oauth_state"
 def _frontend_base() -> str:
     return (settings.frontend_url or "http://localhost").split(",", 1)[0].strip().rstrip("/")
 
+
+def _session_cookie_options() -> dict[str, object]:
+    if settings.is_production:
+        return {"secure": True, "samesite": "none", "httponly": True}
+    return {"secure": False, "samesite": "lax", "httponly": True}
+
+
 def _oauth_error(code: str) -> RedirectResponse:
     return RedirectResponse(f"{_frontend_base()}/login?{urlencode({'github_error': code})}", status_code=303)
 
@@ -95,7 +102,10 @@ def _github_user(db: Session, github_id: str, login: str, email: str) -> User:
     return user
 
 def tokens(response:Response,db:Session,user:User):
-    refresh=issue_refresh(db,user.id); db.commit(); response.set_cookie("refresh_token",refresh,httponly=True,secure=settings.app_env=="production",samesite="lax",max_age=settings.refresh_token_days*86400); return {"access_token":access_token(user.id),"token_type":"bearer"}
+    refresh=issue_refresh(db,user.id); db.commit();
+    cookie_options = _session_cookie_options()
+    response.set_cookie("refresh_token", refresh, max_age=settings.refresh_token_days*86400, **cookie_options)
+    return {"access_token": access_token(user.id), "token_type": "bearer"}
 @router.post("/register")
 def register(payload:Register,response:Response,db:Session=Depends(get_db)):
     user=create_account(db,payload.email,payload.password,payload.organization)
@@ -131,7 +141,8 @@ def github_start(db: Session = Depends(get_db)):
     params = {"client_id": settings.github_oauth_client_id, "redirect_uri": settings.github_oauth_callback_url,
               "scope": "read:user user:email", "state": state, "code_challenge": challenge, "code_challenge_method": "S256"}
     response = RedirectResponse("https://github.com/login/oauth/authorize?" + urlencode(params), status_code=307)
-    response.set_cookie(OAUTH_STATE_COOKIE, state, httponly=True, secure=settings.is_production, samesite="lax", max_age=settings.github_oauth_state_ttl_seconds)
+    cookie_options = _session_cookie_options()
+    response.set_cookie(OAUTH_STATE_COOKIE, state, max_age=settings.github_oauth_state_ttl_seconds, **cookie_options)
     return response
 
 @router.get("/github/callback")

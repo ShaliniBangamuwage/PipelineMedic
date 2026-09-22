@@ -63,6 +63,24 @@ def test_oauth_callback_rejects_invalid_state(client):
     assert "state" in response.json()["detail"].lower()
 
 
+def test_oauth_production_uses_cross_site_session_cookies(client, monkeypatch):
+    test_client, _ = client
+    monkeypatch.setattr(settings, "app_env", "production")
+    monkeypatch.setattr(settings, "frontend_url", "https://pipelinemedic-frontend.vercel.app")
+    monkeypatch.setattr(auth_routes, "_github_exchange", lambda code, verifier: "github-access-token")
+    monkeypatch.setattr(auth_routes, "_github_identity", lambda token: ("12345", "octo-login", "octo@example.com"))
+
+    start = test_client.get("/api/auth/github", follow_redirects=False)
+    state = parse_qs(urlparse(start.headers["location"]).query)["state"][0]
+    response = test_client.get(f"/api/auth/github/callback?code=code&state={state}", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "https://pipelinemedic-frontend.vercel.app/overview"
+    set_cookie = response.headers.get("set-cookie", "").lower()
+    assert "samesite=none" in set_cookie
+    assert "secure" in set_cookie
+
+
 def test_oauth_creates_one_user_and_workspace_then_reuses_both(client, monkeypatch):
     test_client, TestSession = client
     monkeypatch.setattr(auth_routes, "_github_exchange", lambda code, verifier: "github-access-token")
