@@ -13,3 +13,5 @@ node_modules/
 dist/
 .vscode/
 lint-output.txt
+
+cloudflared.exe
