@@ -100,11 +100,10 @@ def invite(organization_id:str,payload:InvitationCreate,context=Depends(require_
     result={"id":invitation.id,"email":email,"role":payload.role,"expiresAt":invitation.expires_at.isoformat()}
     if settings.expose_invitation_urls:
         result["invitationUrl"] = invitation_url_for(raw)
-    if settings.smtp_host and settings.smtp_from_email:
-        try:
-            send_invitation_email(email, organization.name if organization else "PipelineMedic", invitation_url_for(raw), inviter_name=getattr(user, "email", "team"))
-        except Exception:
-            pass
+    try:
+        send_invitation_email(email, organization.name if organization else "PipelineMedic", invitation_url_for(raw), inviter_name=getattr(user, "email", "team"))
+    except Exception:
+        pass
     db.commit()
     return result
 
