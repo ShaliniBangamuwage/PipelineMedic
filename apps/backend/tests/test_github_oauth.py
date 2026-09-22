@@ -127,3 +127,117 @@ def test_oauth_links_only_verified_email_to_existing_account(client, monkeypatch
         linked = db.get(User, existing_id)
         assert linked.github_user_id == "67890"
         assert len(db.scalars(select(User).where(User.email == "octo@example.com")).all()) == 1
+
+
+def test_oauth_uses_public_verified_email(client, monkeypatch):
+    test_client, _ = client
+    monkeypatch.setattr(auth_routes, "_github_exchange", lambda code, verifier: "github-access-token")
+    monkeypatch.setattr(auth_routes, "_github_identity", lambda token: ("9001", "octocat", "octocat@example.com"))
+
+    start = test_client.get("/api/auth/github", follow_redirects=False)
+    state = parse_qs(urlparse(start.headers["location"]).query)["state"][0]
+    response = test_client.get(f"/api/auth/github/callback?code=code&state={state}", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "http://localhost/overview"
+    assert response.cookies.get("refresh_token")
+
+
+def test_oauth_uses_private_verified_email_when_profile_email_missing(monkeypatch):
+    calls = {
+        "profile": {"id": 9002, "login": "private-user", "email": None},
+        "emails": [
+            {"email": "private-user@users.noreply.github.com", "verified": True, "primary": False},
+            {"email": "other@example.com", "verified": False, "primary": False},
+        ],
+    }
+
+    class FakeResponse:
+        def __init__(self, payload, status_code=200):
+            self._payload = payload
+            self.status_code = status_code
+
+        def json(self):
+            return self._payload
+
+    def fake_get(url, headers, timeout):
+        if url.endswith("/user"):
+            return FakeResponse(calls["profile"])
+        if url.endswith("/user/emails"):
+            return FakeResponse(calls["emails"])
+        raise AssertionError(f"Unexpected GitHub URL: {url}")
+
+    monkeypatch.setattr(auth_routes.httpx, "get", fake_get)
+    assert auth_routes._github_identity("token") == ("9002", "private-user", "private-user@users.noreply.github.com")
+
+
+def test_oauth_prefers_primary_verified_email_from_user_emails(monkeypatch):
+    profile = {"id": 9003, "login": "multi-email-user", "email": None}
+    emails = [
+        {"email": "alt@example.com", "verified": True, "primary": False},
+        {"email": "primary@example.com", "verified": True, "primary": True},
+        {"email": "unverified@example.com", "verified": False, "primary": False},
+    ]
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+            self.status_code = 200
+
+        def json(self):
+            return self._payload
+
+    def fake_get(url, headers, timeout):
+        if url.endswith("/user"):
+            return FakeResponse(profile)
+        if url.endswith("/user/emails"):
+            return FakeResponse(emails)
+        raise AssertionError(f"Unexpected GitHub URL: {url}")
+
+    monkeypatch.setattr(auth_routes.httpx, "get", fake_get)
+    assert auth_routes._github_identity("token") == ("9003", "multi-email-user", "primary@example.com")
+
+
+def test_oauth_rejects_account_without_verified_email(monkeypatch):
+    profile = {"id": 9004, "login": "no-email-user", "email": None}
+    emails = [
+        {"email": "not-verified@example.com", "verified": False, "primary": False},
+        {"email": "another@example.com", "verified": False, "primary": False},
+    ]
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+            self.status_code = 200
+
+        def json(self):
+            return self._payload
+
+    def fake_get(url, headers, timeout):
+        if url.endswith("/user"):
+            return FakeResponse(profile)
+        if url.endswith("/user/emails"):
+            return FakeResponse(emails)
+        raise AssertionError(f"Unexpected GitHub URL: {url}")
+
+    monkeypatch.setattr(auth_routes.httpx, "get", fake_get)
+    with pytest.raises(ValueError, match="verified email"):
+        auth_routes._github_identity("token")
+
+
+def test_oauth_existing_github_user_login(client, monkeypatch):
+    test_client, TestSession = client
+    monkeypatch.setattr(auth_routes, "_github_exchange", lambda code, verifier: "github-access-token")
+    monkeypatch.setattr(auth_routes, "_github_identity", lambda token: ("7777", "existing-user", "existing@example.com"))
+
+    start = test_client.get("/api/auth/github", follow_redirects=False)
+    state = parse_qs(urlparse(start.headers["location"]).query)["state"][0]
+    first = test_client.get(f"/api/auth/github/callback?code=code&state={state}", follow_redirects=False)
+    assert first.status_code == 303
+    with TestSession() as db:
+        assert db.scalar(select(User).where(User.github_user_id == "7777")) is not None
+
+    start = test_client.get("/api/auth/github", follow_redirects=False)
+    state = parse_qs(urlparse(start.headers["location"]).query)["state"][0]
+    second = test_client.get(f"/api/auth/github/callback?code=code&state={state}", follow_redirects=False)
+    assert second.status_code == 303

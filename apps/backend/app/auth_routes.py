@@ -59,21 +59,42 @@ def _github_exchange(code: str, code_verifier: str) -> str:
         raise ValueError("GitHub token exchange failed")
     return token
 
+
+def _github_verified_email(profile: dict, email_records: object | None) -> str | None:
+    records: list[dict[str, object]] = []
+    if isinstance(email_records, list):
+        for item in email_records:
+            if not isinstance(item, dict):
+                continue
+            email = str(item.get("email") or "").strip().lower()
+            if not email or not item.get("verified"):
+                continue
+            records.append({"email": email, "primary": bool(item.get("primary"))})
+    if records:
+        primary = next((item["email"] for item in records if item["primary"]), None)
+        return str(primary or records[0]["email"]) if primary or records[0] else None
+    profile_email = str(profile.get("email") or "").strip().lower()
+    return profile_email if profile_email and "@" in profile_email else None
+
+
 def _github_identity(token: str) -> tuple[str, str, str]:
     headers = {"Accept": "application/vnd.github+json", "Authorization": f"Bearer {token}", "X-GitHub-Api-Version": "2022-11-28"}
     response = httpx.get("https://api.github.com/user", headers=headers, timeout=15.0)
     if response.status_code >= 400:
         raise ValueError("Unable to verify GitHub account")
     profile = response.json()
-    email = profile.get("email")
-    if not email:
-        emails = httpx.get("https://api.github.com/user/emails", headers=headers, timeout=15.0)
-        if emails.status_code < 400:
-            verified = [item for item in emails.json() if item.get("verified")]
-            primary = next((item for item in verified if item.get("primary")), None)
-            email = (primary or (verified[0] if verified else {})).get("email")
+    emails_response = httpx.get("https://api.github.com/user/emails", headers=headers, timeout=15.0)
+    email_records = []
+    if emails_response.status_code < 400:
+        try:
+            payload = emails_response.json()
+            if isinstance(payload, list):
+                email_records = payload
+        except ValueError:
+            email_records = []
+    email = _github_verified_email(profile, email_records)
     if not profile.get("id") or not profile.get("login") or not email:
-        raise ValueError("GitHub account must provide a verified email address")
+        raise ValueError("GitHub account has no verified email. Please verify an email address in GitHub and retry.")
     return str(profile["id"]), str(profile["login"]), str(email).lower()
 
 def _github_user(db: Session, github_id: str, login: str, email: str) -> User:
@@ -151,12 +172,10 @@ def github_callback(code: str | None = None, state: str | None = None, error: st
     if error:
         return _oauth_error("GitHub authorization was cancelled.")
     cookie_state = request.cookies.get(OAUTH_STATE_COOKIE) if request else None
-    print("DEBUG_GITHUB_CALLBACK", {"code": code, "state": state, "cookie_state": cookie_state, "request": bool(request)})
     if not code or not state:
         raise HTTPException(400, "Invalid GitHub authentication state")
     state_hash = hashlib.sha256(state.encode()).hexdigest()
     record = db.scalar(select(OAuthLoginState).where(OAuthLoginState.state_hash == state_hash))
-    print("DEBUG_GITHUB_RECORD", {"record_exists": bool(record), "record_state_hash": getattr(record, 'state_hash', None), "expires_at": getattr(record, 'expires_at', None), "used_at": getattr(record, 'used_at', None)})
     if cookie_state is not None and not hmac.compare_digest(state, cookie_state):
         raise HTTPException(400, "Invalid GitHub authentication state")
     expires_at = record.expires_at.replace(tzinfo=timezone.utc) if record and record.expires_at.tzinfo is None else record.expires_at if record else None
