@@ -198,7 +198,7 @@ def test_oauth_prefers_primary_verified_email_from_user_emails(monkeypatch):
     assert auth_routes._github_identity("token") == ("9003", "multi-email-user", "primary@example.com")
 
 
-def test_oauth_rejects_account_without_verified_email(monkeypatch):
+def test_oauth_allows_new_account_when_no_verified_email_is_returned(monkeypatch):
     profile = {"id": 9004, "login": "no-email-user", "email": None}
     emails = [
         {"email": "not-verified@example.com", "verified": False, "primary": False},
@@ -221,8 +221,8 @@ def test_oauth_rejects_account_without_verified_email(monkeypatch):
         raise AssertionError(f"Unexpected GitHub URL: {url}")
 
     monkeypatch.setattr(auth_routes.httpx, "get", fake_get)
-    with pytest.raises(ValueError, match="verified email"):
-        auth_routes._github_identity("token")
+    user_id, login, email = auth_routes._github_identity("token")
+    assert (user_id, login, email) == ("9004", "no-email-user", "")
 
 
 def test_oauth_existing_github_user_login(client, monkeypatch):

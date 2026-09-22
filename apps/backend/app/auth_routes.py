@@ -73,8 +73,11 @@ def _github_verified_email(profile: dict, email_records: object | None) -> str |
     if records:
         primary = next((item["email"] for item in records if item["primary"]), None)
         return str(primary or records[0]["email"]) if primary or records[0] else None
-    profile_email = str(profile.get("email") or "").strip().lower()
-    return profile_email if profile_email and "@" in profile_email else None
+    return None
+
+
+def _github_placeholder_email(github_id: str) -> str:
+    return f"github-{github_id}@pipelinemedic.invalid"
 
 
 def _github_identity(token: str) -> tuple[str, str, str]:
@@ -93,23 +96,33 @@ def _github_identity(token: str) -> tuple[str, str, str]:
         except ValueError:
             email_records = []
     email = _github_verified_email(profile, email_records)
-    if not profile.get("id") or not profile.get("login") or not email:
-        raise ValueError("GitHub account has no verified email. Please verify an email address in GitHub and retry.")
-    return str(profile["id"]), str(profile["login"]), str(email).lower()
+    if not profile.get("id") or not profile.get("login"):
+        raise ValueError("Unable to verify GitHub account")
+    return str(profile["id"]), str(profile["login"]), (str(email).lower() if email else "")
 
-def _github_user(db: Session, github_id: str, login: str, email: str) -> User:
+
+def _github_user(db: Session, github_id: str, login: str, email: str | None) -> User:
+    normalized_email = (email or "").strip().lower()
     user = db.scalar(select(User).where(User.github_user_id == github_id))
     if user:
         user.github_login = login
+        if normalized_email and user.email and user.email.endswith("@pipelinemedic.invalid"):
+            user.email = normalized_email
         return user
-    user = db.scalar(select(User).where(User.email == email))
-    if user:
-        if user.github_user_id and user.github_user_id != github_id:
-            raise ValueError("This email is already linked to another GitHub account")
-        user.github_user_id = github_id
-        user.github_login = login
-        return user
-    user = User(email=email, password_hash=hash_password(secrets.token_urlsafe(32)), github_user_id=github_id, github_login=login)
+
+    if normalized_email:
+        user = db.scalar(select(User).where(User.email == normalized_email))
+        if user:
+            if user.github_user_id and user.github_user_id != github_id:
+                raise ValueError("This email is already linked to another GitHub account")
+            user.github_user_id = github_id
+            user.github_login = login
+            return user
+        resolved_email = normalized_email
+    else:
+        resolved_email = _github_placeholder_email(github_id)
+
+    user = User(email=resolved_email, password_hash=hash_password(secrets.token_urlsafe(32)), github_user_id=github_id, github_login=login)
     db.add(user)
     db.flush()
     name = f"{login}'s Workspace"
