@@ -8,6 +8,8 @@ class Settings(BaseSettings):
     api_prefix: str = "/api"
     database_url: str = "sqlite:///./pipelinemedic.db"
     frontend_url: str = "http://localhost:5173"
+    resend_api_key: str = ""
+    resend_from_email: str = ""
     github_webhook_secret: str = ""
     github_token: str = ""
     github_oauth_client_id: str = ""
@@ -69,6 +71,14 @@ class Settings(BaseSettings):
             raise ValueError("AUTH_ENABLED must be true in production")
         if self.is_production and (len(self.jwt_secret) < 32 or self.jwt_secret == "development-only-change-me"):
             raise ValueError("JWT_SECRET must be at least 32 characters in production")
+
+    @property
+    def frontend_origin(self) -> str:
+        for raw in (self.frontend_url or "").split(","):
+            value = raw.strip().rstrip("/")
+            if value:
+                return value
+        return ""
 
     @property
     def frontend_origins(self):

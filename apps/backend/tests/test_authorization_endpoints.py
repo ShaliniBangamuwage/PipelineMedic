@@ -3,6 +3,7 @@ import jwt
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
+import app.services.email as email_service
 from app.core.config import settings
 from app.db import Base, engine, get_db
 from app.main import app
@@ -164,3 +165,51 @@ def test_empty_organization_overview_is_successful_and_context_is_required(clien
     assert test_client.get("/api/dashboard/trends", headers=headers).json()["series"] == []
     assert test_client.get("/api/analyses", headers=headers).json()["items"] == []
     assert test_client.get("/api/dashboard/summary", headers=auth(token)).status_code == 400
+
+
+def test_invitation_uses_first_frontend_origin_from_comma_separated_config(client, monkeypatch):
+    test_client, _ = client
+    monkeypatch.setattr(settings, "frontend_url", "https://app.example.com, https://www.app.example.com")
+    monkeypatch.setattr(settings, "expose_invitation_urls", True)
+
+    owner = register(test_client, "owner-comma@example.com", "Comma org")
+    organization = org_id(test_client, owner)
+
+    response = test_client.post(
+        f"/api/organizations/{organization}/invitations",
+        headers=auth(owner, organization),
+        json={"email": "invitee-comma@example.com", "role": "DEVELOPER"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["invitationUrl"].startswith("https://app.example.com/invitations/")
+
+
+def test_invitation_email_uses_resend_when_configured(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(settings, "smtp_host", "")
+    monkeypatch.setattr(settings, "smtp_from_email", "")
+    monkeypatch.setattr(settings, "resend_api_key", "test-resend-key")
+    monkeypatch.setattr(settings, "resend_from_email", "noreply@example.com")
+
+    class FakeResponse:
+        status_code = 200
+        text = '{"id":"email_123"}'
+
+        def json(self):
+            return {"id": "email_123"}
+
+    def fake_post(url, headers=None, json=None, timeout=15.0):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["json"] = json
+        return FakeResponse()
+
+    monkeypatch.setattr(email_service.httpx, "post", fake_post)
+
+    assert email_service.send_invitation_email("invitee@example.com", "Org", "https://app.example.com/invitations/abc", "Owner") is True
+    assert captured["url"].startswith("https://api.resend.com/emails")
+    assert captured["headers"]["Authorization"] == "Bearer test-resend-key"
+    assert captured["json"]["from"] == "noreply@example.com"
+    assert captured["json"]["to"] == ["invitee@example.com"]

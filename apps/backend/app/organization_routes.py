@@ -19,7 +19,7 @@ def require_auth(context):
     return context
 
 def invitation_url_for(raw_token: str) -> str:
-    base = settings.frontend_url.strip().rstrip("/")
+    base = settings.frontend_origin
     return f"{base}/invitations/{raw_token}" if base else f"/invitations/{raw_token}"
 
 def as_utc(value: datetime | None) -> datetime | None:
