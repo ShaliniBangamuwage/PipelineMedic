@@ -27,7 +27,7 @@ export function SessionGate({ children }: { children: React.ReactNode }) {
     if (ready) return;
     fetch(API + "/auth/refresh", { method: "POST", credentials: "include" }).then((response) => response.ok ? response.json() : Promise.reject()).then((result) => { setAccessToken(result.access_token); setAuthenticated(true); }).catch(() => setAuthenticated(false)).finally(() => setReady(true));
   }, [ready]);
-  if (!ready) return <main className="auth-page"><div className="panel empty">Restoring session...</div></main>;
+  if (!ready) return <main className="auth-page auth-page--silent" aria-live="polite" aria-busy="true"><div className="session-loading"><span className="session-spinner" aria-hidden="true" /><span>Checking session…</span></div></main>;
   return authenticated ? <>{children}</> : <LandingPage />;
 }
 
