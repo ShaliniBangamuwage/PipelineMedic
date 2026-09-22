@@ -599,21 +599,26 @@ function OrganizationWorkspace({
   const [busy, setBusy] = useState(false);
   const load = () => {
     if (!selected) return;
-    Promise.all([
+    const requests = [
       call(`/organizations/${selected}/members`, {
         headers: { "X-Organization-ID": selected },
       }),
-      call(`/organizations/${selected}/invitations`, {
-        headers: { "X-Organization-ID": selected },
-      }),
-    ])
+    ];
+    if (role === "ADMIN" || role === "OWNER") {
+      requests.push(
+        call(`/organizations/${selected}/invitations`, {
+          headers: { "X-Organization-ID": selected },
+        }),
+      );
+    }
+    Promise.all(requests)
       .then(([memberResult, inviteResult]) => {
         setMembers(memberResult.items || []);
-        setInvites(inviteResult.items || []);
+        setInvites(inviteResult?.items || []);
       })
       .catch(() => setMessage("Could not load workspace details."));
   };
-  useEffect(load, [selected]);
+  useEffect(load, [selected, role]);
   const create = async () => {
     setBusy(true);
     try {
@@ -755,7 +760,7 @@ function OrganizationWorkspace({
           Create organization
         </button>
       </div>
-      {selected && (
+      {selected && (role === "ADMIN" || role === "OWNER") && (
         <>
           <div className="panel form-panel">
             <h3>Invite member</h3>

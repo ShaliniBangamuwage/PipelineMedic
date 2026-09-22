@@ -40,6 +40,23 @@ test('replaces a stale organization with the first organization before loading o
   await waitFor(() => expect(api.mock.calls.some(([path]) => path === '/dashboard/summary')).toBe(true));
 });
 
+test('does not request invitation management data for a viewer', async () => {
+  api.mockImplementation((path: string) => {
+    if (path === '/auth/me') return Promise.resolve({ email: 'viewer@example.com', organizations: [{ id: 'org-viewer', role: 'VIEWER' }] });
+    if (path === '/organizations') return Promise.resolve({ items: [{ id: 'org-viewer', name: 'Viewer org' }] });
+    if (path === '/organizations/org-viewer/members') return Promise.resolve({ items: [] });
+    if (path === '/dashboard/summary') return Promise.resolve({ totalFailures: 0, unresolvedFailures: 0, resolvedFailures: 0, resolutionRate: 0, averageConfidence: 0, repositoriesMonitored: 0, failureRateByRepository: [] });
+    return Promise.resolve({ items: [] });
+  });
+
+  window.history.pushState({}, '', '/organizations');
+  render(<AuthenticatedShell />);
+
+  expect(await screen.findByRole('heading', { name: 'Organizations' })).toBeInTheDocument();
+  await waitFor(() => expect(api.mock.calls.some(([path]) => path === '/organizations/org-viewer/invitations')).toBe(false));
+  expect(screen.queryByText('Invite member')).not.toBeInTheDocument();
+});
+
 test('renders a real settings page for the settings route', async () => {
   window.history.pushState({}, '', '/settings');
   api.mockImplementation((path: string) => {
