@@ -111,6 +111,29 @@ def test_invitation_duplicate_expired_revoked_and_acceptance(client):
     assert test_client.post(f"/api/invitations/{token}/accept",headers=auth(invitee)).status_code==400
     assert test_client.post(f"/api/invitations/{expired['id']}/accept",headers=auth(invitee)).status_code in (400,404)
 
+def test_invitation_uses_frontend_url_and_accepts_normalized_email(client, monkeypatch):
+    test_client,_=client
+    monkeypatch.setattr(settings,"frontend_url","https://app.example.com")
+    monkeypatch.setattr(settings,"expose_invitation_urls",True)
+
+    owner=register(test_client,"owner-email@example.com","Invite URL org")
+    organization=org_id(test_client,owner)
+
+    invite_response=test_client.post(
+        f"/api/organizations/{organization}/invitations",
+        headers=auth(owner,organization),
+        json={"email":"Member.Name+Example@Example.com","role":"DEVELOPER"},
+    )
+    assert invite_response.status_code==200, invite_response.text
+    assert invite_response.json()["invitationUrl"].startswith("https://app.example.com/invitations/")
+
+    invitee=register(test_client,"member.name+example@example.com","Invitee home")
+    token=invite_response.json()["invitationUrl"].split("/")[-1]
+    accept_response=test_client.post(f"/api/invitations/{token}/accept",headers=auth(invitee))
+    assert accept_response.status_code==200, accept_response.text
+    assert accept_response.json()["organizationId"]==organization
+
+
 def test_cross_organization_analysis_feedback_resolution_similarity_dashboard_and_demo_exclusion(client):
     test_client,TestSession=client
     first=register(test_client,"analysis-one@example.com","Analysis one")

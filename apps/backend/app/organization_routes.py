@@ -1,13 +1,14 @@
 from datetime import datetime, timedelta, timezone
 import hashlib, re, secrets
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from app.authz import current_user, organization_context, require_role
 from app.core.config import settings
 from app.db import get_db
 from app.models import Invitation, Organization, OrganizationMember, OrganizationRole, User
 from app.schemas import InvitationCreate, MemberUpdate, OrganizationCreate, OrganizationUpdate
+from app.services.email import send_invitation_email
 
 router=APIRouter(prefix="/api")
 roles={role.value for role in OrganizationRole}
@@ -16,6 +17,15 @@ def slugify(name): return re.sub(r"[^a-z0-9-]", "", re.sub(r"\s+", "-", name.low
 def require_auth(context):
     if not context[0]: raise HTTPException(401,"Authentication required")
     return context
+
+def invitation_url_for(raw_token: str) -> str:
+    base = settings.frontend_url.strip().rstrip("/")
+    return f"{base}/invitations/{raw_token}" if base else f"/invitations/{raw_token}"
+
+def as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 @router.get("/organizations")
 def list_orgs(user=Depends(current_user),db:Session=Depends(get_db)):
@@ -80,10 +90,22 @@ def remove_member(organization_id:str,member_id:str,context=Depends(require_role
 def invite(organization_id:str,payload:InvitationCreate,context=Depends(require_role(OrganizationRole.ADMIN.value)),db:Session=Depends(get_db)):
     user,selected,actor_role=context
     if selected!=organization_id or payload.role not in roles or (payload.role==OrganizationRole.OWNER.value and actor_role!=OrganizationRole.OWNER.value): raise HTTPException(403,"Insufficient organization permissions")
-    email=payload.email.lower();existing_member=db.scalar(select(OrganizationMember).join(User).where(OrganizationMember.organization_id==organization_id,User.email==email))
+    email=(payload.email or "").strip().lower()
+    existing_member=db.scalar(select(OrganizationMember).join(User, User.id==OrganizationMember.user_id).where(OrganizationMember.organization_id==organization_id,func.lower(User.email)==email))
     if existing_member or db.scalar(select(Invitation).where(Invitation.organization_id==organization_id,Invitation.email==email,Invitation.accepted_at.is_(None),Invitation.revoked_at.is_(None),Invitation.expires_at>datetime.now(timezone.utc))): raise HTTPException(409,"An active invitation already exists")
-    raw=secrets.token_urlsafe(32); invitation=Invitation(organization_id=organization_id,email=email,role=payload.role,token_hash=hashlib.sha256(raw.encode()).hexdigest(),invited_by_user_id=user.id,expires_at=datetime.now(timezone.utc)+timedelta(days=7));db.add(invitation);db.commit();result={"id":invitation.id,"email":email,"role":payload.role,"expiresAt":invitation.expires_at.isoformat()}
-    if settings.expose_invitation_urls and settings.app_env!="production": result["invitationUrl"]="/invitations/"+raw
+    raw=secrets.token_urlsafe(32)
+    invitation=Invitation(organization_id=organization_id,email=email,role=payload.role,token_hash=hashlib.sha256(raw.encode()).hexdigest(),invited_by_user_id=user.id,expires_at=datetime.now(timezone.utc)+timedelta(days=7))
+    db.add(invitation); db.flush()
+    organization = db.get(Organization, organization_id)
+    result={"id":invitation.id,"email":email,"role":payload.role,"expiresAt":invitation.expires_at.isoformat()}
+    if settings.expose_invitation_urls:
+        result["invitationUrl"] = invitation_url_for(raw)
+    if settings.smtp_host and settings.smtp_from_email:
+        try:
+            send_invitation_email(email, organization.name if organization else "PipelineMedic", invitation_url_for(raw), inviter_name=getattr(user, "email", "team"))
+        except Exception:
+            pass
+    db.commit()
     return result
 
 @router.get("/organizations/{organization_id}/invitations")
@@ -95,8 +117,10 @@ def invitations(organization_id:str,context=Depends(require_role(OrganizationRol
 def accept(token:str,user=Depends(current_user),db:Session=Depends(get_db)):
     if not user: raise HTTPException(401,"Authentication required")
     invitation=db.scalar(select(Invitation).where(Invitation.token_hash==hashlib.sha256(token.encode()).hexdigest()))
-    if not invitation or invitation.accepted_at or invitation.revoked_at or invitation.expires_at<datetime.now(timezone.utc): raise HTTPException(400,"Invitation is invalid or expired")
-    if user.email!=invitation.email: raise HTTPException(403,"Invitation email does not match current user")
+    expiry = as_utc(invitation.expires_at) if invitation else None
+    if not invitation or invitation.accepted_at or invitation.revoked_at or (expiry is not None and expiry < datetime.now(timezone.utc)):
+        raise HTTPException(400,"Invitation is invalid or expired")
+    if (user.email or "").strip().lower() != invitation.email.lower(): raise HTTPException(403,"Invitation email does not match current user")
     if not db.scalar(select(OrganizationMember).where(OrganizationMember.organization_id==invitation.organization_id,OrganizationMember.user_id==user.id)): db.add(OrganizationMember(organization_id=invitation.organization_id,user_id=user.id,role=invitation.role))
     invitation.accepted_at=datetime.now(timezone.utc);db.commit();return {"organizationId":invitation.organization_id,"accepted":True}
 

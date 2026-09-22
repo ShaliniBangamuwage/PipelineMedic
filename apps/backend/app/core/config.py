@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     refresh_token_days: int = 30
     auth_enabled: bool = False
     expose_invitation_urls: bool = False
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from_email: str = ""
+    smtp_use_tls: bool = True
     api_key_rate_limit_per_minute: int = 60
     api_key_rate_limit_window_seconds: int = 60
     api_key_default_expiry_days: int = 30
